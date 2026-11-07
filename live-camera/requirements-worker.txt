@@ -1,0 +1,6 @@
+# OneStreamer/CUDA dependencies are installed separately by setup-runpod.sh.
+livekit==1.2.1
+livekit-api==1.2.2
+python-dotenv==1.2.4
+pydantic>=2.10,<3
+Pillow>=11,<13

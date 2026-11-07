@@ -1,0 +1,34 @@
+# Upstream is downloaded by setup-runpod.sh at a pinned revision.
+/OneStreamer/
+
+# Credentials
+.env
+.env.*
+!.env.example
+!.env.worker.example
+.onestreamer-camera-key
+.onestreamer-openai.env
+*.pem
+
+# Runtime / downloaded artifacts
+models/
+outputs/
+logs/
+onestreamer-env/
+uv-bootstrap/
+.venv/
+.cache/
+.python/
+server.pid
+onestreamer-installed.txt
+*.log
+.runtime/
+node_modules/
+/camera-staging/
+/live-camera-before-*/
+
+# Python and macOS artifacts
+__pycache__/
+*.py[cod]
+.DS_Store
+._*

@@ -1,0 +1,8 @@
+# Local backend; uv sync at the repository root uses the exact uv.lock versions.
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+livekit==1.2.1
+livekit-api==1.2.2
+python-dotenv==1.2.4
+Pillow>=11,<13
+openai>=2,<3
