@@ -9,7 +9,7 @@ const reviewButton = document.createElement('button');
 reviewButton.id = 'verifyNow';
 reviewButton.className = 'secondary';
 reviewButton.disabled = true;
-reviewButton.textContent = 'Check current view';
+reviewButton.textContent = 'Check task against current view';
 const reviewStatus = document.createElement('div');
 reviewStatus.id = 'reviewStatus';
 reviewStatus.setAttribute('role', 'status');
@@ -54,15 +54,18 @@ function appendReview(row, result) {
   const text = document.createElement('p'); text.className = 'review';
   if (result.status === 'complete') {
     const a = result.assessment;
-    text.textContent = (result.claim ? 'OpenAI: '+a.verdict.toUpperCase()+' · ' : 'OpenAI identifies: ')
-      +a.object_label+' · '+a.certainty+' certainty';
-    if (a.verdict !== 'agree') text.classList.add('warn');
+    text.textContent = 'OpenAI '+(a.kind === 'claim' ? 'claim review: ' : 'task check: ')
+      +a.verdict.replaceAll('_', ' ').toUpperCase()+' · confidence '+(a.confidence*100).toFixed(1)+'%';
+    if (a.verdict !== 'agree' && a.verdict !== 'matches_task') text.classList.add('warn');
     const note = document.createElement('div'); note.className = 'review-note';
-    note.textContent = a.explanation+(a.evidence.length ? '\nEvidence: '+a.evidence.join('; ') : '');
+    note.textContent = a.probabilities.map(p => p.value.replaceAll('_', ' ')+': '
+      +(p.probability*100).toFixed(1)+'%').join(' · ')
+      +'\nModel estimates; not measured accuracy.';
     row.append(text, note);
   } else {
     text.textContent = result.status === 'pending' ? 'OpenAI review pending…'
-      : result.status === 'error' ? result.error : 'OpenAI review skipped: '+result.status;
+      : result.status === 'error' ? result.error
+      : result.status === 'refused' ? 'OpenAI declined this decision.' : 'OpenAI review skipped: '+result.status;
     row.append(text);
   }
 }
@@ -209,7 +212,7 @@ async function health() {
     verifierReady = !!data.verification_configured;
     if (!session && !opening) {
       controls(false);
-      status(!data.livekit_configured ? 'Configure LiveKit in your local .env and restart the backend.'
+      status(!data.livekit_configured ? (data.configuration_error || 'Configure LiveKit in your local .env and restart the backend.')
         : data.ready ? 'GPU worker connected. Ready to start.' : 'Waiting for the GPU worker to connect to LiveKit.');
     }
     $('verifyConfig').textContent = verifierReady ? 'Available · '+data.verification_model

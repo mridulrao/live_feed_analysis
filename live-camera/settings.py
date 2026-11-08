@@ -2,6 +2,7 @@
 import os
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from livekit import api
@@ -23,8 +24,21 @@ class Settings:
             raise ValueError('Backend and worker identities must differ')
 
     @property
+    def configuration_error(self):
+        if not (self.url and self.api_key and self.api_secret):
+            return 'Set LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET in the backend environment.'
+        parsed = urlparse(self.url)
+        if parsed.scheme not in ('ws', 'wss') or not parsed.hostname:
+            return 'LIVEKIT_URL must be your LiveKit WebSocket URL (ws:// or wss://).'
+        if ('your_project' in parsed.hostname.lower()
+                or self.api_key == 'YOUR_LIVEKIT_API_KEY'
+                or self.api_secret == 'YOUR_LIVEKIT_API_SECRET'):
+            return 'Replace the example LiveKit URL, API key and API secret with values from your LiveKit project.'
+        return None
+
+    @property
     def configured(self):
-        return bool(self.url and self.api_key and self.api_secret)
+        return self.configuration_error is None
 
     def token(self, identity, room, *, camera=False):
         return (api.AccessToken(self.api_key, self.api_secret)

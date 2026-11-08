@@ -19,7 +19,8 @@ from protocol import (Crop, MAX_EVIDENCE_BYTES, Observation, Start, WorkerStart,
                       decode_evidence, encode_evidence)
 from server import CameraSession, Coordinator, create_app
 from settings import Settings
-from verification import Assessment, Reviewer
+from verification import Reviewer
+from test_verification import decision_result, mock_client
 
 
 def observation(sid=None):
@@ -34,6 +35,14 @@ def options(sid=None):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_example_credentials_do_not_enable_livekit_connection(self):
+        with patch.dict('os.environ', {'LIVEKIT_URL': 'wss://YOUR_PROJECT.livekit.cloud',
+                'LIVEKIT_API_KEY': 'YOUR_LIVEKIT_API_KEY',
+                'LIVEKIT_API_SECRET': 'YOUR_LIVEKIT_API_SECRET'}):
+            settings = Settings()
+        self.assertFalse(settings.configured)
+        self.assertIn('Replace the example', settings.configuration_error)
+
     def test_evidence_roundtrip_preserves_event_and_selected_frames(self):
         event = observation()
         packet = encode_evidence(event, [Image.new('RGB', (100, 80), c)
@@ -99,10 +108,10 @@ class BackendTests(unittest.TestCase):
 class EvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_review_correlated_deduplicated_and_old_session_rejected(self):
         calls = []
-        def parse(**kwargs):
-            calls.append(kwargs)
-            return SimpleNamespace(output_parsed=Assessment(verdict='agree', object_label='blue object',
-                certainty='medium', evidence=['Blue surface'], explanation='Visible blue surface.'))
+        def handle(request):
+            calls.append(request)
+            import httpx
+            return httpx.Response(200, json=decision_result())
         class Reader:
             def __init__(self, packet, event_id=None):
                 self.packet, self.closed = packet, False
@@ -114,7 +123,7 @@ class EvidenceTests(unittest.IsolatedAsyncioTestCase):
                 yield self.packet[20:]
             def close(self): self.closed = True
         with tempfile.TemporaryDirectory() as directory:
-            reviewer = Reviewer(directory, client=SimpleNamespace(responses=SimpleNamespace(parse=parse)), cooldown=0)
+            reviewer = Reviewer(directory, client=mock_client(handle), cooldown=0)
             c = Coordinator(workspace=directory, reviewer=reviewer)
             s = CameraSession(options())
             c.session = s

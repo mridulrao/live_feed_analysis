@@ -10,7 +10,7 @@ Start with the [repository setup guide](../README.md).
 | `inference.py` | Cloud GPU | OneStreamer loading, per-session context, crop/resize and inference |
 | `protocol.py` | Both | Validated session/events and bounded binary evidence envelopes |
 | `settings.py` | Both | Environment loading and room-scoped token generation |
-| `verification.py` | Local computer | Bounded background OpenAI Responses API second opinion |
+| `verification.py` | Local computer | Bounded background OpenAI Decisions API visual classification |
 
 ## Connections
 

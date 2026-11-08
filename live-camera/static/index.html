@@ -17,7 +17,7 @@
 <template id="extraControls">
  <div class="options control"><div><label for="budget">Image detail</label><select id="budget"><option value="224">Fast · 224 pixel budget</option><option value="336">Balanced · 336 pixel budget</option><option value="448" selected>High · 448 pixel budget</option></select></div><div><label for="crop">Object crop</label><select id="crop"><option value="1">Full view</option><option value="2">Center · 2× crop</option><option value="3">Center · 3× crop</option></select></div></div>
  <p class="hint" style="margin:-12px 0 18px">For small objects, choose a crop and hold the object inside the guide. Cropping excludes the surrounding scene.</p>
- <div class="control"><label class="toggle"><input type="checkbox" id="verify" disabled>OpenAI second opinion</label><p class="hint" id="verifyConfig">Checking verifier configuration…</p><p class="hint">When enabled, two cropped snapshots and your prompt/claim are sent to OpenAI for each reviewed response. API charges apply. Certainty is a model assessment, not a measured probability.</p></div>
+ <div class="control"><label class="toggle"><input type="checkbox" id="verify" disabled>OpenAI second opinion</label><p class="hint" id="verifyConfig">Checking verifier configuration…</p><p class="hint">When enabled, two cropped snapshots and your prompt/claim are sent to OpenAI for each reviewed response. API charges apply. Decisions returns choice probabilities and confidence; these are model estimates, not measured accuracy.</p></div>
 </template>
 <script src="/vendor/livekit-client.umd.js"></script>
 <script src="/app.js"></script>

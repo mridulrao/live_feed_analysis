@@ -262,7 +262,7 @@ class VideoSession:
 async def main():
     settings = Settings()
     if not settings.configured:
-        raise RuntimeError('Configure LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET')
+        raise RuntimeError(settings.configuration_error)
     worker, done = GPUWorker(settings), asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

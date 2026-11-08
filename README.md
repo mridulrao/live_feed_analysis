@@ -26,7 +26,7 @@ cp live-camera/.env.example live-camera/.env
 chmod 600 live-camera/.env
 ```
 
-Edit `live-camera/.env` with your LiveKit project's URL, API key and API secret. Optional OpenAI reviews use `OPENAI_API_KEY` and `OPENAI_VERIFY_MODEL` in this **local** file. The default review model is `gpt-4.1-mini`. You can also set the key interactively with `bash live-camera/configure-openai.sh` after installing dependencies.
+Edit `live-camera/.env` with your LiveKit project's URL, API key and API secret. Optional OpenAI reviews use `OPENAI_API_KEY` and `OPENAI_VERIFY_MODEL` in this **local** file. Reviews use `POST /v1/decisions` with `gpt-6-luna`, the endpoint’s supported model. Other `OPENAI_VERIFY_MODEL` values are rejected at startup. You can also set the key interactively with `bash live-camera/configure-openai.sh` after installing dependencies.
 
 Start the local backend and frontend:
 
@@ -82,9 +82,9 @@ The restart script can stop the previous HTTP server as well as the new worker. 
 - Times are seconds since session creation on the GPU, measured at **frame reception**. They are not exact browser capture timestamps. Network delay is therefore not included in the reported inference time.
 - For each reviewable response, the GPU sends a binary evidence stream containing the first and last cropped snapshots from that exact inference batch, along with the session/event IDs and sample times. Byte streams are addressed only to the backend. They are not ordinary data-message attachments.
 - The backend calls OpenAI asynchronously. At most one review is in flight with a five-second minimum interval. Busy, cooldown, unclear and failure states remain explicit. The camera/inference pipeline does not wait for OpenAI.
-- Manual **Check current view** asks the GPU for its latest fresh sampled frames and does not reuse an old model claim.
+- Manual **Check task against current view** asks the GPU for its latest fresh sampled frames and classifies whether the visible scene matches your instruction; it does not identify arbitrary objects or reuse an old model claim.
 - Selected snapshots are held in memory, not saved as image files. JSONL observations and reviews are written under `.runtime/outputs/` on the local computer. OpenAI receives snapshots only when verification is enabled; normal video transits LiveKit to the GPU.
-- Two snapshots can support object identification, but cannot establish historical counts or arbitrary action sequences. Model agreement and subjective certainty do not establish correctness.
+- Two snapshots can support object identification, but cannot establish historical counts or arbitrary action sequences. Decisions returns agree/disagree/unclear, or matches-task/does-not-match-task/unclear for manual checks, with choice probabilities and confidence. These are model estimates, not measured accuracy. The endpoint does not generate object labels or written explanations.
 
 The current deployment deliberately supports **one camera session per GPU worker/coordinator pair**. Give separate pairs different control rooms and identities. A lost browser stops publication; a local polling lease expires after about 35–45 seconds, and the GPU independently stops after 45 seconds without backend heartbeats. Stopping waits for running inference before resetting model state; a new session may briefly report that the GPU is finishing.
 

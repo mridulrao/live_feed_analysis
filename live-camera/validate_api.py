@@ -13,7 +13,6 @@ import logging
 import os
 import tempfile
 import time
-from types import SimpleNamespace
 import uuid
 
 import httpx
@@ -24,7 +23,7 @@ from gpu_worker import GPUWorker
 from protocol import Observation, crop_frame
 from server import Coordinator, create_app
 from settings import Settings
-from verification import Assessment, Reviewer
+from verification import Reviewer
 
 
 class SyntheticEngine:
@@ -66,21 +65,27 @@ async def validate(args):
         LIVEKIT_CONTROL_ROOM='test-control-'+uuid.uuid4().hex,
         LIVEKIT_BACKEND_IDENTITY='test-backend', LIVEKIT_WORKER_IDENTITY='test-gpu', OPENAI_API_KEY='')
     calls = []
-    def parse(**kwargs):
-        calls.append(kwargs)
-        for part in kwargs['input'][0]['content']:
+    def decide(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        assert str(request.url) == 'https://api.openai.com/v1/decisions'
+        assert body['model'] == 'gpt-6-luna'
+        for part in body['input'][0]['content']:
             if part['type'] == 'input_image':
                 import base64
                 with Image.open(io.BytesIO(base64.b64decode(part['image_url'].split(',')[1]))) as image:
                     assert image.size == (160, 120), image.size
-        return SimpleNamespace(output_parsed=Assessment(verdict='agree', object_label='blue object',
-            certainty='medium', evidence=['Blue surface'], explanation='Synthetic review.'))
+        choices = [c['value'] for c in body['questions'][0]['choices']]
+        return httpx.Response(200, json={'answers': [{'type': 'choice', 'name': 'visual_assessment',
+            'choice': choices[0], 'confidence': .8, 'probabilities': [
+                {'value': value, 'probability': .9 if i == 0 else .05}
+                for i, value in enumerate(choices)]}]})
     settings = Settings()
     worker = GPUWorker(settings, engine_factory=SyntheticEngine)
     publisher = rtc.Room()
     pump_task = None
     with tempfile.TemporaryDirectory() as directory:
-        reviewer = Reviewer(directory, client=SimpleNamespace(responses=SimpleNamespace(parse=parse)), cooldown=0)
+        reviewer = Reviewer(directory, client=httpx.Client(transport=httpx.MockTransport(decide)), cooldown=0)
         c = Coordinator(settings=settings, workspace=directory, reviewer=reviewer)
         app = create_app(c)
         try:

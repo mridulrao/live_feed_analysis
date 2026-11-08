@@ -314,6 +314,7 @@ def create_app(coordinator=None):
     def health():
         c = service()
         return dict(ready=c.worker_ready, livekit_configured=c.settings.configured,
+                    configuration_error=c.settings.configuration_error,
                     verification_configured=c.reviewer.configured, verification_model=c.reviewer.model)
 
     @app.post('/api/start', dependencies=[Depends(authorize)])
