@@ -81,6 +81,8 @@ async def validate(args):
                 {'value': value, 'probability': .9 if i == 0 else .05}
                 for i, value in enumerate(choices)]}]})
     settings = Settings()
+    # This transport-only validation uses a synthetic observer and no GPU plugins.
+    settings.tracking_models_enabled = False
     worker = GPUWorker(settings, engine_factory=SyntheticEngine)
     publisher = rtc.Room()
     pump_task = None

@@ -14,6 +14,13 @@ load_dotenv(os.environ.get('LIVE_CAMERA_ENV', str(ROOT / '.env')))
 
 class Settings:
     def __init__(self):
+        # Worker capability/lifetime flag; independent of the per-session UI switch.
+        self.tracking_models_enabled = os.environ.get('TRACKING_MODELS_ENABLED', 'true').strip().lower() in ('true', '1', 'yes', 'on')
+        self.detection_plugin = os.environ.get('DETECTION_PLUGIN', 'locate_anything')
+        self.tracking_plugin = os.environ.get('TRACKING_PLUGIN', 'csrt')
+        self.localization_retry_seconds = float(os.environ.get('LOCALIZATION_RETRY_SECONDS', '1'))
+        if not .1 <= self.localization_retry_seconds <= 30:
+            raise ValueError('LOCALIZATION_RETRY_SECONDS must be between .1 and 30')
         self.url = os.environ.get('LIVEKIT_URL', '')
         self.api_key = os.environ.get('LIVEKIT_API_KEY', '')
         self.api_secret = os.environ.get('LIVEKIT_API_SECRET', '')

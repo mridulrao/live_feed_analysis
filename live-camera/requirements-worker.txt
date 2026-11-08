@@ -4,3 +4,7 @@ livekit-api==1.2.2
 python-dotenv==1.2.4
 pydantic>=2.10,<3
 Pillow>=11,<13
+
+# CSRT visual tracking on CPU; contrib contains the tracking API.
+opencv-contrib-python-headless==4.11.0.86
+numpy>=1.26,<2

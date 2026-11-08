@@ -12,9 +12,11 @@ import uuid
 from livekit import rtc
 from PIL import Image
 
-from inference import OneStreamer
+from onestreamer import OneStreamer
 from protocol import (EVENT_TOPIC, EVIDENCE_TOPIC, Observation, SessionID,
-                      WorkerStart, crop_frame, encode_evidence)
+                      WorkerStart, crop_frame, encode_evidence, TRACK_TOPIC, TrackingUpdate, TrackingControl)
+from object_detection import create_detector
+from tracking import create_tracker
 from settings import Settings
 
 log = logging.getLogger('gpu-worker')
@@ -25,6 +27,9 @@ class GPUWorker:
         self.settings, self.engine_factory = settings, engine_factory
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='onestreamer')
         self.engine = None
+        self.detector = None
+        self.tracker = None
+        self.tracking_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='visual-tracker')
         self.control = rtc.Room()
         self.active = None
         self.guard = asyncio.Lock()
@@ -33,9 +38,20 @@ class GPUWorker:
         # Shield prevents cancellation from releasing ownership of running CUDA work.
         return await asyncio.shield(asyncio.get_running_loop().run_in_executor(self.executor, fn, *args))
 
-    async def connect(self):
+    async def cpu(self, fn, *args):
+        return await asyncio.shield(asyncio.get_running_loop().run_in_executor(self.tracking_executor, fn, *args))
+
+    async def prepare_models(self):
         if self.engine is None:
             self.engine = await self.gpu(self.engine_factory)
+        if self.settings.tracking_models_enabled and self.detector is None:
+            tracker = await self.cpu(create_tracker, self.settings.tracking_plugin)
+            detector = create_detector(self.settings.detection_plugin)
+            await detector.start()
+            self.detector, self.tracker = detector, tracker
+
+    async def connect(self):
+        await self.prepare_models()
         await self.control.connect(self.settings.url,
             self.settings.token(self.settings.worker_identity, self.settings.control_room),
             rtc.RoomOptions(auto_subscribe=False))
@@ -53,6 +69,8 @@ class GPUWorker:
                     options = WorkerStart.model_validate(body)
                     if self.active:
                         raise ValueError('GPU is busy or finishing the previous session')
+                    if options.tracking and self.detector is None:
+                        raise ValueError('Tracking models are disabled; set TRACKING_MODELS_ENABLED=true and restart the GPU worker')
                     session = VideoSession(self, options)
                     self.active = session
                     try:
@@ -68,6 +86,10 @@ class GPUWorker:
                     return json.dumps({'ok': True})
                 if not self.active or self.active.options.session_id != sid:
                     raise ValueError('Session ended')
+                if action == 'tracking':
+                    control = TrackingControl.model_validate(body)
+                    await self.active.set_tracking(control.enabled)
+                    return json.dumps({'enabled': control.enabled, 'generation': self.active.generation})
                 if action == 'heartbeat':
                     self.active.touched = time.monotonic()
                 elif action == 'stop':
@@ -104,6 +126,9 @@ class GPUWorker:
             if self.active.task:
                 await self.active.task
         await self.control.disconnect()
+        if self.detector:
+            await self.detector.close()
+        self.tracking_executor.shutdown(wait=True, cancel_futures=True)
         self.executor.shutdown(wait=True, cancel_futures=True)
 
 
@@ -112,6 +137,21 @@ class VideoSession:
         self.worker, self.options = worker, options
         self.room = rtc.Room()
         self.frames = deque(maxlen=4)
+        self.tracker = None
+        self.tracking_task = self.localization_task = None
+        self.pending_detection = None
+        self.mapping_pending = False
+        self.tracker_active = False
+        self.tracking_frames = deque(maxlen=180)
+        self.tracker_time = -1
+        self.last_localization = float('-inf')
+        self.track_sequence = 0
+        self.generation = 0
+        self.track_status = 'waiting'
+        self.track_message = ''
+        self.latest_video_time = 0
+        self.target_query = ''
+        self.detection_request = None
         self.stopped = asyncio.Event()
         self.epoch = self.touched = time.monotonic()
         self.last_sample = float('-inf')
@@ -148,11 +188,17 @@ class VideoSession:
         def disconnected(*_):
             self.stopped.set()
 
+        self.tracker = self.worker.tracker
+        if self.tracker:
+            await self.worker.cpu(self.tracker.reset)
         await self.worker.gpu(self.worker.engine.start, self.options)
         await self.room.connect(self.worker.settings.url,
             self.worker.settings.token(self.worker.settings.worker_identity, self.options.room),
             rtc.RoomOptions(auto_subscribe=False))
         self.sender = asyncio.create_task(self.send_evidence())
+        if self.tracker:
+            self.tracking_task = asyncio.create_task(self.track_loop())
+            self.localization_task = asyncio.create_task(self.detect_loop())
 
     async def receive(self, track):
         stream = rtc.VideoStream(track, capacity=1, format=rtc.VideoBufferType.RGB24)
@@ -161,9 +207,10 @@ class VideoSession:
                 now = time.monotonic()
                 if self.stopped.is_set():
                     break
-                if now-self.last_sample < .25:
+                self.latest_video_time = now-self.epoch
+                sample = now-self.last_sample >= .25
+                if not sample and not self.options.tracking:
                     continue
-                self.last_sample = now
                 frame = frame_event.frame
                 if min(frame.width, frame.height) < 32 or max(frame.width, frame.height) > 4096:
                     raise ValueError('Unexpected video dimensions')
@@ -175,7 +222,14 @@ class VideoSession:
                     image = image.rotate(-rotation, expand=True)
                 image.thumbnail((1280, 1280))
                 # Receiver-relative time: do not misrepresent arrival time as capture time.
-                self.frames.append((now-self.epoch, image))
+                if sample:
+                    self.last_sample = now
+                    self.frames.append((now-self.epoch, image))
+                if self.options.tracking:
+                    small = image.copy()
+                    small.thumbnail((640, 640))
+                    self.tracking_frames.append((now-self.epoch, small))
+
         except Exception:
             log.exception('Video receiver failed')
         finally:
@@ -240,14 +294,189 @@ class VideoSession:
                 result, images, times = await self.worker.gpu(self.worker.engine.step, batch)
                 if self.stopped.is_set():
                     break
+                if self.options.tracking and result.state == 'response':
+                    self.trigger_localization(result, images[-1], times[-1])
                 if self.options.verify and result.state == 'response':
                     self.queue_evidence(result, images, times)
                 await self.publish(result)
             await asyncio.sleep(.05)
 
+    async def set_tracking(self, enabled):
+        if enabled and self.worker.detector is None:
+            raise ValueError('Tracking models are disabled on the GPU worker')
+        if self.options.tracking == enabled:
+            return
+        self.generation += 1
+        self.options.tracking = enabled
+        self.target_query = ''
+        self.detection_request = self.pending_detection = None
+        self.mapping_pending = self.tracker_active = False
+        self.tracking_frames.clear()
+        self.tracker_time = -1
+        self.last_localization = float('-inf')
+        self.track_status, self.track_message = 'waiting', ''
+        if self.tracker:
+            await self.worker.cpu(self.tracker.reset)
+        # Any already-running detection is allowed to finish, then discarded by generation.
+        # The detector process and CSRT dependencies remain loaded.
+
+    def trigger_localization(self, result, image, timestamp):
+        if not self.options.tracking or self.tracker_active or self.mapping_pending:
+            return
+        query = self.options.tracking_target.strip() or (result.response or '')[:500]
+        if query:
+            # Keep the chosen target description through loss/reacquisition.
+            self.target_query = self.target_query or query
+            if time.monotonic()-self.last_localization >= self.worker.settings.localization_retry_seconds:
+                self.mapping_pending = True
+                self.detection_request = (image, timestamp, self.target_query, self.generation)
+
+    async def localize(self, image, timestamp, query, generation=None):
+        generation = self.generation if generation is None else generation
+        self.mapping_pending = True
+        self.track_status, self.track_message = 'localizing', 'Target noticed—please hold position until mapped'
+        try:
+            boxes = await self.worker.detector.detect(image, query)
+            if self.stopped.is_set() or not self.options.tracking or generation != self.generation:
+                return
+            crop = self.options.crop
+            if crop:
+                for box in boxes:
+                    x1, y1, x2, y2 = box.box
+                    box.box = [crop.x+x1*crop.width, crop.y+y1*crop.height,
+                               crop.x+x2*crop.width, crop.y+y2*crop.height]
+            if boxes:
+                self.pending_detection = (timestamp, boxes, generation)
+            else:
+                self.mapping_pending = False
+                self.track_status, self.track_message = 'lost', 'Target not located—hold it in view while we try again'
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception('Detection failed')
+            if self.options.tracking and generation == self.generation:
+                self.mapping_pending = False
+                self.track_status, self.track_message = 'error', 'Localization failed; check GPU worker logs'
+
+    async def detect_loop(self):
+        last_timestamp = -1
+        while not self.stopped.is_set():
+            if not self.options.tracking or not self.target_query or self.tracker_active:
+                await asyncio.sleep(.05)
+                continue
+            request = self.detection_request
+            self.detection_request = None
+            if request is None:
+                if self.mapping_pending or time.monotonic()-self.last_localization < self.worker.settings.localization_retry_seconds:
+                    await asyncio.sleep(.05)
+                    continue
+                if self.frames:
+                    timestamp, image = self.frames[-1]
+                    request = (crop_frame(image, self.options.crop), timestamp, self.target_query, self.generation)
+            if request and request[1] > last_timestamp:
+                last_timestamp = request[1]
+                self.last_localization = time.monotonic()
+                await self.localize(*request)
+            else:
+                # No fresh camera frame: don't repeatedly localize an old snapshot.
+                if self.pending_detection is None:
+                    self.mapping_pending = False
+                await asyncio.sleep(.05)
+
+    async def publish_tracks(self, timestamp, boxes):
+        self.track_sequence += 1
+        update = TrackingUpdate(session_id=self.options.session_id, generation=self.generation,
+            sequence=self.track_sequence, frame_time=timestamp, status=self.track_status,
+            boxes=boxes, message=self.track_message)
+        await asyncio.wait_for(self.room.local_participant.publish_data(
+            update.model_dump_json().encode(), reliable=True, topic=TRACK_TOPIC,
+            destination_identities=[self.worker.settings.backend_identity]), 2)
+
+    def lose_target(self, message):
+        self.tracker_active = self.mapping_pending = False
+        self.track_status, self.track_message = 'lost', message
+
+    async def track_loop(self):
+        boxes = []
+        last_publish = float('-inf')
+        try:
+            while not self.stopped.is_set():
+                if not self.options.tracking:
+                    boxes = []
+                    await asyncio.sleep(.05)
+                    continue
+                generation = self.generation
+                if self.pending_detection:
+                    timestamp, detections, detected_generation = self.pending_detection
+                    self.pending_detection = None
+                    if detected_generation == generation:
+                        original = next((im for t, im in self.tracking_frames if t == timestamp), None)
+                        if original is None:
+                            boxes = []
+                            self.lose_target('Mapping frame expired—hold position while we locate again')
+                        else:
+                            boxes = await self.worker.cpu(self.tracker.initialize, original, detections)
+                            if generation != self.generation:
+                                boxes = []
+                                continue
+                            self.tracker_time = timestamp
+                            self.tracker_active = bool(boxes)
+                            if not boxes:
+                                self.lose_target('Target too small to track—hold it closer while we locate again')
+                if self.tracker_active:
+                    frames = list(self.tracking_frames)
+                    if frames and self.tracker_time < frames[0][0]:
+                        boxes = []
+                        self.lose_target('Tracking fell behind—hold position while we locate again')
+                    else:
+                        # Small replay batches keep status publication responsive while
+                        # catching up from the exact localization frame.
+                        for timestamp, image in [(t, im) for t, im in frames if t > self.tracker_time][:8]:
+                            boxes = await self.worker.cpu(self.tracker.update, image)
+                            if generation != self.generation or self.stopped.is_set():
+                                boxes = []
+                                break
+                            self.tracker_time = timestamp
+                            if not boxes:
+                                self.lose_target('Target lost—hold it in view while we locate again')
+                                break
+                if generation != self.generation or not self.options.tracking:
+                    boxes = []
+                    continue
+                lag = max(0, time.monotonic()-self.epoch-self.tracker_time)
+                visible = boxes
+                if self.tracker_active:
+                    if lag <= .5:
+                        self.mapping_pending = False
+                        self.track_status, self.track_message = 'tracking', 'Tracking active—you can move the object'
+                    else:
+                        self.mapping_pending = True
+                        self.track_status, self.track_message = 'localizing', 'Mapped; aligning with live video—please keep holding position'
+                        visible = []
+                if time.monotonic()-self.epoch-self.latest_video_time > 1:
+                    visible = []
+                    if self.tracker_active:
+                        self.track_status, self.track_message = 'waiting', 'Waiting for fresh camera frames'
+                now = time.monotonic()
+                if now-last_publish >= .1:
+                    await self.publish_tracks(max(0, self.tracker_time), visible)
+                    last_publish = now
+                await asyncio.sleep(.01)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception('Tracker failed')
+            self.track_status, self.track_message = 'error', 'Tracker failed; restart the session'
+            with suppress(Exception):
+                await self.publish_tracks(self.latest_video_time, [])
+
     async def close(self):
         self.stopped.set()
-        for task in (self.receiver, self.sender):
+        # Let the in-flight detector reply drain before the next session uses it.
+        if self.localization_task:
+            with suppress(Exception):
+                await self.localization_task
+        for task in (self.receiver, self.sender, self.tracking_task):
             if task:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -257,6 +486,9 @@ class VideoSession:
         finally:
             await self.worker.gpu(self.worker.engine.stop)
             self.frames.clear()
+            self.tracking_frames.clear()
+            if self.tracker:
+                await self.worker.cpu(self.tracker.reset)
 
 
 async def main():
@@ -270,7 +502,7 @@ async def main():
     try:
         # Load failures should fail startup; transient LiveKit outages should retry
         # without repeatedly loading another model into GPU memory.
-        worker.engine = await worker.gpu(worker.engine_factory)
+        await worker.prepare_models()
         delay = 1
         while not done.is_set():
             if not worker.control.isconnected():

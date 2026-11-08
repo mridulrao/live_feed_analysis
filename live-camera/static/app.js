@@ -9,6 +9,84 @@ const reviewStatus = $('reviewStatus');
 let room = null, cameraTrack = null, session = null, opening = false, stopping = false;
 let polling = null, pollBusy = false, verifierReady = false, epoch = 0;
 let history = [], reviewResults = new Map();
+let trackPolling = null, trackBusy = false, latestTracks = null, tracksReceived = 0;
+let trackingGeneration = 0, trackingToggleBusy = false;
+function showTrackingStatus(message) {
+  $('trackingStatus').textContent = message;
+  const notice = $('trackingNotice');
+  notice.textContent = message;
+  notice.hidden = !session || !$('tracking').checked;
+}
+$('tracking').onchange = async () => {
+  const enabled = $('tracking').checked;
+  latestTracks = null;
+  showTrackingStatus(enabled ? 'Enabling tracking…' : 'Tracking off');
+  clearInterval(trackPolling); trackPolling = null;
+  if (!session) return;
+  const requested = session;
+  trackingToggleBusy = true;
+  $('tracking').disabled = true;
+  try {
+    const result = await api('tracking', {session_id: requested, enabled});
+    if (requested !== session) return;
+    trackingGeneration = result.generation;
+    showTrackingStatus(enabled ? 'Watching for your target…' : 'Tracking off');
+  } catch (error) {
+    if (requested !== session) return;
+    $('tracking').checked = !enabled;
+    showTrackingStatus(error.message);
+  } finally {
+    trackingToggleBusy = false;
+    $('tracking').disabled = opening || stopping || trackingToggleBusy;
+    if (requested === session && $('tracking').checked) {
+      trackPolling = setInterval(pollTracks, 100); void pollTracks();
+    }
+  }
+};
+async function pollTracks() {
+  if (!session || trackBusy || stopping || !$('tracking').checked) return;
+  trackBusy = true;
+  const requested = session;
+  try {
+    const data = await api('tracks', {session_id: requested});
+    if (requested !== session || !$('tracking').checked) return;
+    latestTracks = data.tracking?.generation === trackingGeneration ? data.tracking : null;
+    tracksReceived = performance.now();
+    showTrackingStatus(latestTracks
+      ? latestTracks.message || 'Watching for your target…'
+      : 'Waiting for tracking updates…');
+  } catch {
+    if (requested !== session) return;
+    latestTracks = null;
+    showTrackingStatus('Tracking connection interrupted');
+  } finally { trackBusy = false; }
+}
+function drawTracks() {
+  const canvas = $('tracks'), video = $('video'), stage = video.parentElement;
+  const width = stage.clientWidth, height = stage.clientHeight;
+  if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, width, height);
+  if (session && $('tracking').checked && latestTracks && performance.now()-tracksReceived < 750 && video.videoWidth) {
+    const scale = Math.min(width/video.videoWidth, height/video.videoHeight);
+    const vw = video.videoWidth*scale, vh = video.videoHeight*scale;
+    const left = (width-vw)/2, top = (height-vh)/2;
+    ctx.strokeStyle = '#cef894'; ctx.fillStyle = '#cef894'; ctx.lineWidth = 2; ctx.font = '13px system-ui';
+    for (const track of latestTracks.boxes) {
+      const [x1, y1, x2, y2] = track.box;
+      // Mirror coordinates to match the local preview, while keeping text readable.
+      const x = left+(1-x2)*vw, y = top+y1*vh;
+      ctx.strokeRect(x, y, (x2-x1)*vw, (y2-y1)*vh);
+      const label = track.label+' #'+track.track_id;
+      const textWidth = Math.min(width-8, ctx.measureText(label).width+10);
+      const tx = Math.max(0, Math.min(x, width-textWidth)), ty = Math.max(20, y);
+      ctx.fillRect(tx, ty-20, textWidth, 20);
+      ctx.fillStyle = '#101211'; ctx.fillText(label, tx+5, ty-5, textWidth-10); ctx.fillStyle = '#cef894';
+    }
+  }
+  requestAnimationFrame(drawTracks);
+}
+requestAnimationFrame(drawTracks);
 const status = (message, error = false) => {
   $('status').textContent = message;
   $('status').classList.toggle('error', error);
@@ -25,7 +103,8 @@ async function api(path, body) {
 function controls(active) {
   $('start').disabled = active;
   $('stop').disabled = !active;
-  for (const id of ['prompt', 'key', 'camera', 'budget', 'crop']) $(id).disabled = active;
+  for (const id of ['prompt', 'key', 'camera', 'budget', 'crop', 'trackingTarget']) $(id).disabled = active;
+  $('tracking').disabled = opening || stopping || trackingToggleBusy;
   $('verify').disabled = active || !verifierReady;
   reviewButton.disabled = !active || !$('verify').checked;
 }
@@ -125,6 +204,7 @@ async function poll() {
 }
 async function closeMedia() {
   clearInterval(polling); polling = null;
+  clearInterval(trackPolling); trackPolling = null; latestTracks = null; showTrackingStatus('Tracking off');
   if (cameraTrack) { cameraTrack.stop(); cameraTrack.detach(); cameraTrack = null; }
   const oldRoom = room; room = null;
   if (oldRoom) await oldRoom.disconnect();
@@ -178,8 +258,10 @@ $('start').onclick = async () => {
     if (selected) $('camera').value = selected;
     status('Starting GPU session…');
     const result = await api('start', {question: $('prompt').value.trim(),
-      image_budget: Number($('budget').value), crop: cropSettings(), verify: $('verify').checked});
-    session = result.session_id;
+      image_budget: Number($('budget').value), crop: cropSettings(), verify: $('verify').checked,
+      tracking: $('tracking').checked, tracking_target: $('trackingTarget').value.trim()});
+    session = result.session_id; trackingGeneration = 0;
+    showTrackingStatus($('tracking').checked ? 'Watching for your target…' : 'Tracking off');
     const nextRoom = new LivekitClient.Room({adaptiveStream: false, dynacast: false});
     room = nextRoom;
     nextRoom.on(LivekitClient.RoomEvent.Disconnected, () => {
@@ -194,10 +276,12 @@ $('start').onclick = async () => {
     $('sessionInfo').textContent = 'LiveKit · GPU samples at 4 FPS · 32-frame context · '+result.image_budget+' pixel budget';
     $('cameraTag').textContent = 'LIVE · WEBRTC';
     cameraTrack.mediaStreamTrack.addEventListener('ended', () => void stop());
-    controls(true); polling = setInterval(poll, 1000); await poll();
+    controls(true); polling = setInterval(poll, 1000);
+    if ($('tracking').checked) { trackPolling = setInterval(pollTracks, 100); void pollTracks(); }
+    await poll();
   } catch (error) {
     status(error.message || 'Unable to start camera', true); await stop(true);
-  } finally { opening = false; }
+  } finally { opening = false; controls(!!session); }
 };
 window.addEventListener('pagehide', () => {
   cameraTrack?.stop();

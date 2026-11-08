@@ -52,11 +52,12 @@ For a fresh pod, configure persistent storage before installation, clone this re
 
 ```bash
 bash live-camera/setup-runpod.sh
+bash /workspace/live-camera/setup-tracking.sh
 cp /workspace/live-camera/.env.worker.example /workspace/.onestreamer-livekit.env
 chmod 600 /workspace/.onestreamer-livekit.env
 ```
 
-Edit `/workspace/.onestreamer-livekit.env` with the **same LiveKit project, control room and identities** as the local backend. No OpenAI key is needed on the GPU. Then:
+Edit `/workspace/.onestreamer-livekit.env` with the **same LiveKit project, control room and identities** as the local backend. No OpenAI key is needed on the GPU. Detection/tracking models preload by default; set `TRACKING_MODELS_ENABLED=false` to run only OneStreamer and skip the tracking setup. Then:
 
 ```bash
 bash /workspace/live-camera/restart.sh
@@ -69,6 +70,7 @@ For an existing deployment, copy the updated `live-camera/` source into `/worksp
 
 ```bash
 /workspace/onestreamer-env/bin/python -m pip install -r /workspace/live-camera/requirements-worker.txt
+bash /workspace/live-camera/setup-tracking.sh
 bash /workspace/live-camera/restart.sh
 ```
 
@@ -114,3 +116,11 @@ uv run --frozen python live-camera/validate_api.py
 This test uses a synthetic video publisher, a deliberately slow fake OneStreamer adapter and a fake OpenAI client. It checks real video subscription, concurrent sampling, backpressure, cropped evidence byte streams, manual review, correlation, stop/room cleanup and session isolation. It is restricted to localhost with LiveKit's development credentials and never calls OpenAI.
 
 See [runtime details](live-camera/README.md) for component boundaries and troubleshooting. The ignored local `OneStreamer/` directory is upstream code; setup downloads [MCG-NJU/OneStreamer](https://github.com/MCG-NJU/OneStreamer) at revision `338e5fe77383fc8d691bd6226c0358bcb2c83704`. Upstream code and model weights retain their respective licenses.
+
+## Optional object localization and tracking
+
+Enable event-triggered LocateAnything grounding and live labeled CSRT tracking with
+the [GPU setup and behavior guide](live-camera/README.md#event-triggered-localization-and-tracking).
+OneStreamer remains the observer; localization runs in a separate persistent process,
+and tracking runs on the CPU. L40S latency and combined GPU memory usage still require
+hardware validation.

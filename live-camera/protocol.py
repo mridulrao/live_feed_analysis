@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 EVENT_TOPIC = 'onestreamer.events.v1'
 EVIDENCE_TOPIC = 'onestreamer.evidence.v1'
+TRACK_TOPIC = 'onestreamer.tracks.v1'
 MAX_EVIDENCE_BYTES = 2_000_000
 
 
@@ -33,6 +34,8 @@ class Start(BaseModel):
     image_budget: Literal[224, 336, 448] = 448
     crop: Crop | None = None
     verify: bool = False
+    tracking: bool = False
+    tracking_target: str = Field(default="", max_length=500)
 
     @model_validator(mode='after')
     def nonempty(self):
@@ -44,6 +47,11 @@ class Start(BaseModel):
 
 class SessionID(BaseModel):
     session_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+
+
+class TrackingControl(SessionID):
+    model_config = ConfigDict(extra='forbid')
+    enabled: bool
 
 
 class WorkerStart(Start, SessionID):
@@ -123,3 +131,30 @@ def decode_evidence(packet):
             images.append(image.convert('RGB'))
         offset += length
     return observation, images, timestamps
+
+
+class DetectionBox(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False, extra='forbid')
+    label: str = Field(min_length=1, max_length=500)
+    box: list[float] = Field(min_length=4, max_length=4)
+
+    @model_validator(mode='after')
+    def valid_box(self):
+        x1, y1, x2, y2 = self.box
+        if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
+            raise ValueError('Invalid normalized bounding box')
+        return self
+
+
+class TrackedBox(DetectionBox):
+    track_id: int = Field(ge=1)
+
+
+class TrackingUpdate(SessionID):
+    model_config = ConfigDict(allow_inf_nan=False, extra='forbid')
+    generation: int = Field(default=0, ge=0)
+    sequence: int = Field(ge=0)
+    frame_time: float = Field(ge=0)
+    status: Literal['waiting', 'localizing', 'tracking', 'lost', 'expired', 'error']
+    boxes: list[TrackedBox] = Field(default_factory=list, max_length=8)
+    message: str = Field(default='', max_length=500)

@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 from livekit import api, rtc
 
 from protocol import (EVENT_TOPIC, EVIDENCE_TOPIC, MAX_EVIDENCE_BYTES,
-                      Observation, SessionID, Start, WorkerStart, decode_evidence)
+                      Observation, SessionID, Start, WorkerStart, decode_evidence, TRACK_TOPIC, TrackingUpdate, TrackingControl)
 from settings import ROOT, Settings
 from verification import Reviewer
 
@@ -29,6 +29,9 @@ class CameraSession:
         self.output = output
         self.room = rtc.Room()
         self.events = OrderedDict()
+        self.tracking = None
+        self.tracking_received = 0
+        self.tracking_generation = 0
         self.evidence_seen = set()
         self.evidence_failures = OrderedDict()
         self.evidence_task = None
@@ -161,11 +164,19 @@ class Coordinator:
     def attach_handlers(self, session):
         @session.room.on('data_received')
         def received(packet):
-            if (packet.topic != EVENT_TOPIC or not packet.participant
+            if (packet.topic not in (EVENT_TOPIC, TRACK_TOPIC) or not packet.participant
                     or packet.participant.identity != self.settings.worker_identity
                     or not session.active or len(packet.data) > 15_000):
                 return
             try:
+                if packet.topic == TRACK_TOPIC:
+                    update = TrackingUpdate.model_validate_json(packet.data)
+                    if (update.session_id == session.options.session_id and session.options.tracking
+                            and update.generation == session.tracking_generation
+                            and (session.tracking is None or update.sequence > session.tracking['sequence'])):
+                        session.tracking = update.model_dump()
+                        session.tracking_received = time.monotonic()
+                    return
                 observation = Observation.model_validate_json(packet.data)
                 if observation.session_id != session.options.session_id:
                     return
@@ -220,6 +231,18 @@ class Coordinator:
         if not self.session or self.session.options.session_id != sid:
             raise HTTPException(409, 'Unknown session')
         return self.session
+
+    async def set_tracking(self, body):
+        async with self.guard:
+            session = self.current(body.session_id)
+            if not session.active:
+                raise HTTPException(409, 'No active session')
+            result = await self.command('tracking', body)
+            session.options.tracking = result['enabled']
+            session.tracking_generation = result['generation']
+            session.tracking = None
+            session.tracking_received = 0
+            return result
 
     async def stop(self, sid):
         async with self.guard:
@@ -328,6 +351,16 @@ def create_app(coordinator=None):
         session.touched = time.monotonic()
         return {'active': session.active, 'events': list(session.events.values()),
                 'reviews': c.reviewer.get_results(body.session_id)}
+
+    @app.post('/api/tracking', dependencies=[Depends(authorize)])
+    async def tracking(body: TrackingControl):
+        return await service().set_tracking(body)
+
+    @app.post('/api/tracks', dependencies=[Depends(authorize)])
+    def tracks(body: SessionID):
+        session = service().current(body.session_id)
+        update = session.tracking if session.active and session.options.tracking and time.monotonic()-session.tracking_received < 1 else None
+        return {'tracking': update}
 
     @app.post('/api/verify', dependencies=[Depends(authorize)])
     async def verify(body: SessionID):

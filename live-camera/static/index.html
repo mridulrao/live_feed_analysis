@@ -26,9 +26,11 @@
       <div class="panel-head"><h2 id="cameraHeading">Camera</h2><span class="panel-note">LIVE INPUT</span></div>
       <div class="preview">
         <video id="video" autoplay muted playsinline></video>
+        <canvas id="tracks" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
         <div class="placeholder"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-4v12l-6-4"/></svg><span>Your camera preview appears here</span></div>
         <div class="tag" id="cameraTag">CAMERA OFF</div>
       </div>
+      <div id="trackingNotice" class="hint" role="status" aria-live="polite" hidden></div>
       <div class="metrics"><span>Elapsed <strong id="elapsed">0.0s</strong></span><span>GPU <strong id="gpuTime">—</strong></span><span>Transport <strong id="roundTrip">—</strong></span></div>
     </section>
     <section class="output-panel" aria-labelledby="outputHeading">
@@ -51,6 +53,7 @@
           <div><label for="crop">Object crop</label><select id="crop"><option value="1">Full view</option><option value="2">Center · 2× crop</option><option value="3">Center · 3× crop</option></select></div>
         </div>
         <p class="hint">For small objects, choose a crop and hold the object inside the guide. Cropping excludes surrounding context.</p>
+        <div class="control"><label class="toggle"><input type="checkbox" id="tracking">Enable tracking</label><p class="hint" id="trackingStatus">Turn detection and tracking on or off, including during a live session.</p><label for="trackingTarget">Target description (optional)</label><input id="trackingTarget" maxlength="500" placeholder="e.g. the bottle held up to the camera"><p class="hint">Leave blank to use OneStreamer's observation. Hold the target still while LocateAnything maps it. CSRT then follows it through the video.</p></div>
         <div class="control"><label class="toggle"><input type="checkbox" id="showAll">Show observation states</label></div>
         <div class="control"><label class="toggle"><input type="checkbox" id="verify" disabled>OpenAI second opinion</label><p class="hint" id="verifyConfig">Checking verifier configuration…</p><p class="hint">When enabled, selected snapshots and your prompt/claim are sent to OpenAI. API charges apply. Probabilities and confidence are model estimates.</p></div>
         <button id="verifyNow" class="secondary" disabled>Check task against current view</button>

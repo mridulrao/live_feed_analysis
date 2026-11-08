@@ -52,6 +52,6 @@ source /workspace/onestreamer-env/bin/activate
 python -m pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
 python -m pip install packaging==25.0 psutil==7.2.2 ninja setuptools wheel
 MAX_JOBS=4 python -m pip install --no-build-isolation -r /workspace/OneStreamer/Eval/requirements.txt
-python -m pip install --no-deps -r /workspace/OneStreamer/Eval/requirements-opencv.txt
+# Worker requirements install the contrib OpenCV wheel used by CSRT.
 python -m pip install -r /workspace/live-camera/requirements-worker.txt
 bash /workspace/live-camera/finish-setup.sh
