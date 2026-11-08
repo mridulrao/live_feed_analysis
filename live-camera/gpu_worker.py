@@ -17,6 +17,7 @@ from protocol import (EVENT_TOPIC, EVIDENCE_TOPIC, Observation, SessionID,
                       WorkerStart, crop_frame, encode_evidence, TRACK_TOPIC, TrackingUpdate, TrackingControl)
 from object_detection import create_detector
 from tracking import create_tracker
+from tracking.verification import tracks_match
 from settings import Settings
 
 log = logging.getLogger('gpu-worker')
@@ -145,6 +146,13 @@ class VideoSession:
         self.tracking_frames = deque(maxlen=180)
         self.tracker_time = -1
         self.last_localization = float('-inf')
+        self.track_history = deque(maxlen=180)
+        self.tracker_revision = 0
+        self.pending_verification = None
+        self.verifying = False
+        self.verification_error = ''
+        self.last_verification_attempt = float('-inf')
+        self.last_verified = None
         self.track_sequence = 0
         self.generation = 0
         self.track_status = 'waiting'
@@ -314,6 +322,13 @@ class VideoSession:
         self.tracking_frames.clear()
         self.tracker_time = -1
         self.last_localization = float('-inf')
+        self.track_history.clear()
+        self.tracker_revision += 1
+        self.pending_verification = None
+        self.last_verified = None
+        self.last_verification_attempt = float('-inf')
+        self.verification_error = ''
+        self.verifying = False
         self.track_status, self.track_message = 'waiting', ''
         if self.tracker:
             await self.worker.cpu(self.tracker.reset)
@@ -339,17 +354,12 @@ class VideoSession:
             boxes = await self.worker.detector.detect(image, query)
             if self.stopped.is_set() or not self.options.tracking or generation != self.generation:
                 return
-            crop = self.options.crop
-            if crop:
-                for box in boxes:
-                    x1, y1, x2, y2 = box.box
-                    box.box = [crop.x+x1*crop.width, crop.y+y1*crop.height,
-                               crop.x+x2*crop.width, crop.y+y2*crop.height]
+            boxes = self.full_view_boxes(boxes)
             if boxes:
                 self.pending_detection = (timestamp, boxes, generation)
             else:
                 self.mapping_pending = False
-                self.track_status, self.track_message = 'lost', 'Target not located—hold it in view while we try again'
+                self.track_status, self.track_message = 'lost', 'Target not visible—hold it in view; searching automatically'
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -358,10 +368,62 @@ class VideoSession:
                 self.mapping_pending = False
                 self.track_status, self.track_message = 'error', 'Localization failed; check GPU worker logs'
 
+    def full_view_boxes(self, boxes):
+        crop = self.options.crop
+        if crop:
+            for box in boxes:
+                x1, y1, x2, y2 = box.box
+                box.box = [crop.x+x1*crop.width, crop.y+y1*crop.height,
+                           crop.x+x2*crop.width, crop.y+y2*crop.height]
+        return boxes
+
+    async def verify_target(self, image, timestamp, tracked, generation, revision):
+        if (self.stopped.is_set() or not self.options.tracking or not self.tracker_active
+                or generation != self.generation or revision != self.tracker_revision):
+            return
+        self.verifying = True
+        self.last_verification_attempt = time.monotonic()
+        try:
+            detections = self.full_view_boxes(await self.worker.detector.detect(
+                crop_frame(image, self.options.crop), self.target_query))
+            if (self.stopped.is_set() or not self.options.tracking or generation != self.generation
+                    or revision != self.tracker_revision or not self.tracker_active):
+                return
+            matched = tracks_match(tracked, detections,
+                getattr(self.worker.settings, 'track_verification_min_iou', .2))
+            self.pending_verification = (timestamp, detections, matched, generation, revision)
+            self.verification_error = ''
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception('Target verification unavailable')
+            if generation == self.generation and revision == self.tracker_revision:
+                self.verification_error = 'Target check unavailable; retrying'
+        finally:
+            if generation == self.generation and revision == self.tracker_revision:
+                self.verifying = False
+
+    async def maybe_verify(self):
+        if self.mapping_pending or self.pending_verification or not self.track_history:
+            return
+        interval = getattr(self.worker.settings, 'track_verification_interval', 3)
+        if time.monotonic()-self.last_verification_attempt < interval:
+            return
+        timestamp, tracked = self.track_history[-1]
+        # Both CSRT and the detector must inspect exactly the same image/time.
+        image = next((im for t, im in self.tracking_frames if t == timestamp), None)
+        if image is None or not tracked or time.monotonic()-self.epoch-timestamp > 1:
+            return
+        await self.verify_target(image, timestamp, tracked, self.generation, self.tracker_revision)
+
     async def detect_loop(self):
         last_timestamp = -1
         while not self.stopped.is_set():
-            if not self.options.tracking or not self.target_query or self.tracker_active:
+            if not self.options.tracking or not self.target_query:
+                await asyncio.sleep(.05)
+                continue
+            if self.tracker_active:
+                await self.maybe_verify()
                 await asyncio.sleep(.05)
                 continue
             request = self.detection_request
@@ -393,6 +455,10 @@ class VideoSession:
             destination_identities=[self.worker.settings.backend_identity]), 2)
 
     def lose_target(self, message):
+        self.tracker_revision += 1
+        self.pending_verification = None
+        self.verifying = False
+        self.track_history.clear()
         self.tracker_active = self.mapping_pending = False
         self.track_status, self.track_message = 'lost', message
 
@@ -406,6 +472,31 @@ class VideoSession:
                     await asyncio.sleep(.05)
                     continue
                 generation = self.generation
+                if self.pending_verification:
+                    timestamp, detections, matched, checked_generation, revision = self.pending_verification
+                    self.pending_verification = None
+                    if checked_generation == generation and revision == self.tracker_revision and self.tracker_active:
+                        max_age = getattr(self.worker.settings, 'track_verification_max_age', 15)
+                        if time.monotonic()-self.epoch-timestamp <= max_age:
+                            if matched:
+                                self.last_verified = self.epoch+timestamp
+                            else:
+                                boxes = []
+                                self.lose_target('Target not visible—searching automatically')
+                                # A matching target elsewhere is a fresh candidate, never
+                                # silently treated as the same physical object.
+                                if detections:
+                                    self.mapping_pending = True
+                                    self.pending_detection = (timestamp, detections, generation)
+                                    self.track_status, self.track_message = 'localizing', 'Track drift detected—hold position while we map the target again'
+                                await self.publish_tracks(max(0, self.tracker_time), [])
+                if generation != self.generation or not self.options.tracking:
+                    boxes = []
+                    continue
+                max_age = getattr(self.worker.settings, 'track_verification_max_age', 15)
+                if self.tracker_active and self.last_verified is not None and time.monotonic()-self.last_verified > max_age:
+                    boxes = []
+                    self.lose_target('Target verification expired—hold position while we locate again')
                 if self.pending_detection:
                     timestamp, detections, detected_generation = self.pending_detection
                     self.pending_detection = None
@@ -420,6 +511,11 @@ class VideoSession:
                                 boxes = []
                                 continue
                             self.tracker_time = timestamp
+                            self.tracker_revision += 1
+                            self.track_history.clear()
+                            self.track_history.append((timestamp, list(boxes)))
+                            self.last_verified = self.epoch+timestamp
+                            self.last_verification_attempt = time.monotonic()
                             self.tracker_active = bool(boxes)
                             if not boxes:
                                 self.lose_target('Target too small to track—hold it closer while we locate again')
@@ -437,6 +533,7 @@ class VideoSession:
                                 boxes = []
                                 break
                             self.tracker_time = timestamp
+                            self.track_history.append((timestamp, list(boxes)))
                             if not boxes:
                                 self.lose_target('Target lost—hold it in view while we locate again')
                                 break
@@ -448,7 +545,9 @@ class VideoSession:
                 if self.tracker_active:
                     if lag <= .5:
                         self.mapping_pending = False
-                        self.track_status, self.track_message = 'tracking', 'Tracking active—you can move the object'
+                        self.track_status, self.track_message = 'tracking', (
+                            'Tracking active—checking target' if self.verifying else self.verification_error
+                            or 'Tracking active—you can move the object')
                     else:
                         self.mapping_pending = True
                         self.track_status, self.track_message = 'localizing', 'Mapped; aligning with live video—please keep holding position'
@@ -487,6 +586,7 @@ class VideoSession:
             await self.worker.gpu(self.worker.engine.stop)
             self.frames.clear()
             self.tracking_frames.clear()
+            self.track_history.clear()
             if self.tracker:
                 await self.worker.cpu(self.tracker.reset)
 

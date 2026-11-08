@@ -132,7 +132,7 @@ continues asking the user to hold still and hides stale boxes. Only then does it
 show **Tracking active—you can move the object**. This threshold is worker-side;
 network transit and browser polling introduce additional latency.
 
-While CSRT is active, LocateAnything is not called again. OneStreamer continues
+While CSRT is active, LocateAnything periodically verifies that it is still following the target. OneStreamer continues
 observing, and additional responses do not replace a healthy target. CSRT follows
 the initial target set frame by frame for as long as it reports success, without a
 fixed tracking timeout. Up to eight initial objects can be followed. The visual
@@ -148,11 +148,42 @@ box to current video. Reacquired objects receive new IDs: this does not establis
 that the same physical object returned.
 
 CSRT uses appearance and can drift or report success on an incorrect region after
-occlusion, fast motion or appearance changes. Its success flag is not identity
-verification. No automatic semantic verification of apparently healthy tracks is
-performed. For recovery from silent drift, toggle tracking off/on to start again.
+occlusion, fast motion or appearance changes. The worker now uses LocateAnything
+as an independent check of the original target description, even when CSRT reports
+success. It compares the detector's boxes against the CSRT boxes recorded for the
+exact same frame, avoiding false drift decisions caused by motion during inference.
+Every tracked object must overlap a distinct detected target.
 
-Tracking updates publish at most 10 times per second and use a separate
+Worker defaults (also listed in `.env.worker.example`):
+
+```env
+TRACK_VERIFICATION_INTERVAL_SECONDS=3
+TRACK_VERIFICATION_MAX_AGE_SECONDS=15
+TRACK_VERIFICATION_MIN_IOU=0.2
+```
+
+Only one detection/verification runs at a time. Checks begin at most once per
+configured interval; inference time can lengthen that cadence. CSRT continues
+following frames while a check is in flight. On disagreement, the old box is
+immediately cleared. If the detector finds the target elsewhere, CSRT initializes
+on that frame, catches up, and assigns fresh IDs. If no target is found, the UI
+shows **Target not visible—searching automatically**, and fresh frames are searched
+until the target returns without another OneStreamer response being required.
+
+Successful checks renew trust based on their source-frame time. Errors and replies
+from before a toggle or tracker replacement cannot renew it. Tracks without a
+successful localization/verification within the maximum age are cleared and searched
+again. The verification process stays within the existing detector lifetime and
+the Enable tracking toggle; disabling tracking discards in-flight results.
+
+This checks agreement with the target description, not physical-object identity.
+LocateAnything can also misidentify a target; overlapping device/hair regions may
+still pass the IoU threshold. There is no reference-image identity embedding or
+claim of guaranteed recovery. Periodic checks add GPU work, so measure their latency
+alongside OneStreamer on the actual deployment.
+
+Tracking updates normally publish at most 10 times per second, with immediate
+clear messages on verification failure, and use a separate
 authenticated `/api/tracks` poll at 100 ms. The backend retains only the latest
 result. The browser accounts for letterboxing and mirrors box positions to match
 the preview while keeping labels readable. Stale boxes clear on frame/update

@@ -21,6 +21,13 @@ class Settings:
         self.localization_retry_seconds = float(os.environ.get('LOCALIZATION_RETRY_SECONDS', '1'))
         if not .1 <= self.localization_retry_seconds <= 30:
             raise ValueError('LOCALIZATION_RETRY_SECONDS must be between .1 and 30')
+        self.track_verification_interval = float(os.environ.get('TRACK_VERIFICATION_INTERVAL_SECONDS', '3'))
+        self.track_verification_max_age = float(os.environ.get('TRACK_VERIFICATION_MAX_AGE_SECONDS', '15'))
+        self.track_verification_min_iou = float(os.environ.get('TRACK_VERIFICATION_MIN_IOU', '.2'))
+        if not .1 <= self.track_verification_interval <= self.track_verification_max_age <= 120:
+            raise ValueError('Verification interval must be positive and at most max age (maximum 120 seconds)')
+        if not 0 < self.track_verification_min_iou <= 1:
+            raise ValueError('TRACK_VERIFICATION_MIN_IOU must be in (0, 1]')
         self.url = os.environ.get('LIVEKIT_URL', '')
         self.api_key = os.environ.get('LIVEKIT_API_KEY', '')
         self.api_secret = os.environ.get('LIVEKIT_API_SECRET', '')

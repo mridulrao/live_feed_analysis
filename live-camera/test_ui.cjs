@@ -73,3 +73,12 @@ test('hold-position instructions appear beside the camera and hide when disabled
   await elements.get('tracking').onchange();
   assert.equal(elements.get('trackingNotice').hidden, true);
 });
+
+test('verification failure replaces old boxes with target-absent status', async () => {
+  const {elements, run} = await page();
+  elements.get('tracking').checked = true;
+  run('latestTracks = {boxes: [{label: "device"}]}; api = async () => ({tracking: {generation: 0, status: "lost", message: "Target not visible—searching automatically", boxes: []}});');
+  await run('pollTracks()');
+  assert.equal(run('latestTracks.boxes.length'), 0);
+  assert.match(elements.get('trackingNotice').textContent, /not visible/);
+});

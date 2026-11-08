@@ -204,7 +204,7 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
         image = Image.new('RGB', (80, 80))
         async def cpu(fn, *args):
             return fn(*args)
-        session = VideoSession(SimpleNamespace(cpu=cpu), options())
+        session = VideoSession(SimpleNamespace(cpu=cpu, settings=SimpleNamespace()), options())
         session.tracker = SimpleNamespace(initialize=lambda im, detections: detections,
             update=lambda im: [box()])
         session.epoch = time.monotonic()-3
@@ -228,7 +228,7 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_expired_mapping_frame_is_not_used_on_current_video(self):
         image = Image.new('RGB', (80, 80))
-        session = VideoSession(SimpleNamespace(), options())
+        session = VideoSession(SimpleNamespace(settings=SimpleNamespace()), options())
         session.tracker = SimpleNamespace(initialize=lambda *args: self.fail('Expired box must not initialize CSRT'))
         session.tracking_frames.append((2., image))
         session.pending_detection = (1., [box()], 0)
