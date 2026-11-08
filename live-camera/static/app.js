@@ -1,19 +1,11 @@
 /* Camera media travels through LiveKit; HTTP calls only control the local backend. */
 const $ = id => document.getElementById(id);
-$('start').parentElement.before($('extraControls').content.cloneNode(true));
 const guide = document.createElement('div');
 guide.className = 'crop-guide';
 guide.innerHTML = '<span>OBJECT CROP</span>';
 $('video').parentElement.append(guide);
-const reviewButton = document.createElement('button');
-reviewButton.id = 'verifyNow';
-reviewButton.className = 'secondary';
-reviewButton.disabled = true;
-reviewButton.textContent = 'Check task against current view';
-const reviewStatus = document.createElement('div');
-reviewStatus.id = 'reviewStatus';
-reviewStatus.setAttribute('role', 'status');
-$('status').after(reviewButton, reviewStatus);
+const reviewButton = $('verifyNow');
+const reviewStatus = $('reviewStatus');
 let room = null, cameraTrack = null, session = null, opening = false, stopping = false;
 let polling = null, pollBusy = false, verifierReady = false, epoch = 0;
 let history = [], reviewResults = new Map();
@@ -45,11 +37,17 @@ function updateGuide() {
   const c = cropSettings();
   guide.style.display = c && cameraTrack ? 'block' : 'none';
   if (c) {
-    guide.style.left = c.x*100+'%'; guide.style.top = c.y*100+'%';
-    guide.style.width = c.width*100+'%'; guide.style.height = c.height*100+'%';
+    const video = $('video'), stage = video.parentElement;
+    if (!video.videoWidth || !video.videoHeight) return;
+    const scale = Math.min(stage.clientWidth/video.videoWidth, stage.clientHeight/video.videoHeight);
+    const width = video.videoWidth*scale, height = video.videoHeight*scale;
+    guide.style.left = ((stage.clientWidth-width)/2+c.x*width)+'px';
+    guide.style.top = ((stage.clientHeight-height)/2+c.y*height)+'px';
+    guide.style.width = c.width*width+'px'; guide.style.height = c.height*height+'px';
   }
 }
 $('crop').onchange = updateGuide;
+window.addEventListener('resize', updateGuide);
 function appendReview(row, result) {
   const text = document.createElement('p'); text.className = 'review';
   if (result.status === 'complete') {
@@ -159,7 +157,9 @@ $('showAll').onchange = render;
 $('start').onclick = async () => {
   if (opening || session || stopping) return;
   if (!$('key').value.trim() || !$('prompt').value.trim()) {
-    status('Enter your local access key and an instruction.', true); return;
+    $('settings').open = true;
+    (!$('key').value.trim() ? $('key') : $('prompt')).focus();
+    status('Enter your local access key and an instruction in Settings.', true); return;
   }
   if (!window.LivekitClient) { status('Install the browser dependencies with npm ci --prefix live-camera/web.', true); return; }
   opening = true; controls(true); $('stop').disabled = true;
@@ -170,7 +170,6 @@ $('start').onclick = async () => {
       resolution: {width: 1280, height: 720, frameRate: 15}
     });
     cameraTrack.attach($('video')); await $('video').play(); $('video').classList.add('active');
-    $('video').parentElement.style.aspectRatio = $('video').videoWidth+'/'+$('video').videoHeight;
     updateGuide();
     const devices = await navigator.mediaDevices.enumerateDevices();
     const selected = cameraTrack.mediaStreamTrack.getSettings().deviceId;
