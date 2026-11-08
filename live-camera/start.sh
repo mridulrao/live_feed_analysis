@@ -2,6 +2,7 @@
 set -euo pipefail
 source /workspace/onestreamer-env/bin/activate
 export HF_HOME=/workspace/.cache/huggingface
+export HF_HUB_ENABLE_HF_TRANSFER=0
 export TOKENIZERS_PARALLELISM=false
 export LIVE_CAMERA_ENV="${LIVE_CAMERA_ENV:-/workspace/.onestreamer-livekit.env}"
 cd /workspace/live-camera

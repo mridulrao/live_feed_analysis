@@ -11,6 +11,8 @@ nvidia-smi --query-gpu=name,memory.total --format=csv
 export UV_PYTHON_INSTALL_DIR=/workspace/.python
 export UV_CACHE_DIR=/workspace/.cache/uv
 export HF_HOME=/workspace/.cache/huggingface
+# GPU templates can enable an optional downloader absent from our isolated venv.
+export HF_HUB_ENABLE_HF_TRANSFER=0
 export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_PROGRESS_BAR=off HF_HUB_DISABLE_PROGRESS_BARS=1
 mkdir -p /workspace/logs /workspace/models /workspace/outputs
 if ! command -v uv >/dev/null; then
@@ -26,8 +28,14 @@ import shutil
 source = Path(os.environ['ONESTREAMER_APP_SOURCE']).resolve()
 destination = Path('/workspace/live-camera')
 if source != destination.resolve():
+    def ignore_runtime(directory, names):
+        ignored = set(shutil.ignore_patterns('__pycache__', '*.pyc', '._*',
+                      'server.pid', 'node_modules')(directory, names))
+        ignored.update(name for name in names if name.startswith('.env')
+                       and name not in ('.env.example', '.env.worker.example'))
+        return ignored
     shutil.copytree(source, destination, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '._*', 'server.pid', '.env*'))
+                    ignore=ignore_runtime)
 PY
 if [[ ! -d /workspace/OneStreamer/.git ]]; then
   git clone https://github.com/MCG-NJU/OneStreamer.git /workspace/OneStreamer
@@ -46,13 +54,4 @@ python -m pip install packaging==25.0 psutil==7.2.2 ninja setuptools wheel
 MAX_JOBS=4 python -m pip install --no-build-isolation -r /workspace/OneStreamer/Eval/requirements.txt
 python -m pip install --no-deps -r /workspace/OneStreamer/Eval/requirements-opencv.txt
 python -m pip install -r /workspace/live-camera/requirements-worker.txt
-python - <<'PY'
-from pathlib import Path
-from huggingface_hub import snapshot_download
-snapshot_download(repo_id='MCG-NJU/OneStreamer-4B', local_dir='/workspace/models/OneStreamer-4B')
-PY
-cp /workspace/live-camera/run-video.sh /workspace/run-onestreamer.sh
-cp /workspace/live-camera/README.md /workspace/README-OneStreamer.md
-chmod +x /workspace/run-onestreamer.sh /workspace/live-camera/start.sh
-python -m pip freeze > /workspace/onestreamer-installed.txt
-echo 'Setup complete. Configure /workspace/.onestreamer-livekit.env, then bash /workspace/live-camera/restart.sh'
+bash /workspace/live-camera/finish-setup.sh

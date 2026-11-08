@@ -24,6 +24,7 @@ OpenAI remains optional. A configured key alone does not send snapshots: verific
 
 ## Troubleshooting
 
+- **Missing `hf_transfer` during model download:** a GPU template may set `HF_HUB_ENABLE_HF_TRANSFER=1` even though the isolated model environment does not contain that optional package. Updated setup/start scripts disable that optional downloader. After copying the updated source into `/workspace/live-camera`, run `bash /workspace/live-camera/finish-setup.sh` to retry the model download and finish setup without repeating dependency installation. Preserve existing model/cache files.
 - **LiveKit unconfigured:** edit the local `live-camera/.env` and restart the local backend.
 - **Waiting for GPU worker:** check the worker's model load logs, LiveKit project/room/identities on both machines, and outbound network access.
 - **Unauthorized coordinator:** the `LIVEKIT_BACKEND_IDENTITY` values differ between machines.
