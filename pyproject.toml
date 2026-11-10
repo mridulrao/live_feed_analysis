@@ -5,6 +5,7 @@ description = "LiveKit camera transport, local review backend, and cloud OneStre
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "aiohttp>=3.12,<4",
     "fastapi>=0.115,<1",
     "httpx>=0.28,<1",
     "livekit>=1,<2",

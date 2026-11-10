@@ -13,7 +13,7 @@ Local backend ◄───────────────────┴─
      └── local HTTP controls/results ──► browser
 ```
 
-The backend and GPU worker wait in a shared control room. The backend creates a fresh media room for every camera session and configures the worker through LiveKit RPC. The browser receives a short-lived, camera-only publishing token; LiveKit signing credentials and OpenAI credentials remain server-side.
+The backend and GPU worker wait in a shared control room. The backend creates a fresh media room for every camera session and configures the worker through LiveKit RPC. The browser receives a short-lived, camera publishing token (plus microphone publication and audio subscription when voice is enabled); LiveKit signing credentials and OpenAI credentials remain server-side.
 
 ## 1. Local computer
 
@@ -40,7 +40,7 @@ Open **http://localhost:8000**, which browsers treat as a secure context for cam
 cat .runtime/local-access-key
 ```
 
-Paste that generated local access key into the page. It protects local control endpoints and is unrelated to your LiveKit or OpenAI keys. Wait for **GPU worker connected**, then start the camera. The UI retains crop/detail controls, observation states and manual OpenAI checks. No microphone is requested yet.
+Paste that generated local access key into the page. It protects local control endpoints and is unrelated to your LiveKit or OpenAI keys. Wait for **GPU worker connected**, then start the camera. The UI retains crop/detail controls, observation states and manual OpenAI checks. Enable **Talk with GPT-Live** in Settings to publish your microphone and hear the assistant. Voice requires `OPENAI_API_KEY` in the local backend environment.
 
 Do not use `--reload` or multiple backend workers: the coordinator owns persistent room connections and one active session. Use the same hostname consistently; an HTTP LAN address will need HTTPS for camera access.
 
@@ -85,12 +85,12 @@ The restart script can stop the previous HTTP server as well as the new worker. 
 - For each reviewable response, the GPU sends a binary evidence stream containing the first and last cropped snapshots from that exact inference batch, along with the session/event IDs and sample times. Byte streams are addressed only to the backend. They are not ordinary data-message attachments.
 - The backend calls OpenAI asynchronously. At most one review is in flight with a five-second minimum interval. Busy, cooldown, unclear and failure states remain explicit. The camera/inference pipeline does not wait for OpenAI.
 - Manual **Check task against current view** asks the GPU for its latest fresh sampled frames and classifies whether the visible scene matches your instruction; it does not identify arbitrary objects or reuse an old model claim.
-- Selected snapshots are held in memory, not saved as image files. JSONL observations and reviews are written under `.runtime/outputs/` on the local computer. OpenAI receives snapshots only when verification is enabled; normal video transits LiveKit to the GPU.
+- With continuous vision memory enabled (the default), descriptions and selected cropped JPEG snapshots are stored in the local SQLite memory database. With memory disabled, review snapshots are held only in memory. JSONL observations and reviews are written under `.runtime/outputs/` on the local computer. OpenAI receives snapshots only when verification is enabled; normal video transits LiveKit to the GPU.
 - Two snapshots can support object identification, but cannot establish historical counts or arbitrary action sequences. Decisions returns agree/disagree/unclear, or matches-task/does-not-match-task/unclear for manual checks, with choice probabilities and confidence. These are model estimates, not measured accuracy. The endpoint does not generate object labels or written explanations.
 
 The current deployment deliberately supports **one camera session per GPU worker/coordinator pair**. Give separate pairs different control rooms and identities. A lost browser stops publication; a local polling lease expires after about 35–45 seconds, and the GPU independently stops after 45 seconds without backend heartbeats. Stopping waits for running inference before resetting model state; a new session may briefly report that the GPU is finishing.
 
-The worker uses decoded RGB frames and PIL preprocessing on the GPU host; this is not an NVDEC/zero-copy GPU decode implementation. LiveKit supplies the future media foundation for a voice agent; a voice agent and speech-based decision policy are not implemented yet.
+The worker uses decoded RGB frames and PIL preprocessing on the GPU host; this is not an NVDEC/zero-copy GPU decode implementation. An optional GPT-Live participant joins the media room for voice. See the voice and vision memory section below.
 
 ## Validation
 
@@ -111,9 +111,12 @@ Then:
 
 ```bash
 uv run --frozen python live-camera/validate_api.py
+uv run --frozen python live-camera/validate_voice.py
 ```
 
-This test uses a synthetic video publisher, a deliberately slow fake OneStreamer adapter and a fake OpenAI client. It checks real video subscription, concurrent sampling, backpressure, cropped evidence byte streams, manual review, correlation, stop/room cleanup and session isolation. It is restricted to localhost with LiveKit's development credentials and never calls OpenAI.
+The voice test uses real LiveKit microphone/speaker tracks and a simulated GPT-Live socket; it checks visual context injection, image-bearing memory tool results and Responses continuation without contacting OpenAI.
+
+The camera test uses a synthetic video publisher, a deliberately slow fake OneStreamer adapter and a fake OpenAI client. It checks real video subscription, concurrent sampling, backpressure, cropped evidence byte streams, manual review, correlation, stop/room cleanup and session isolation. It is restricted to localhost with LiveKit's development credentials and never calls OpenAI.
 
 See [runtime details](live-camera/README.md) for component boundaries and troubleshooting. The ignored local `OneStreamer/` directory is upstream code; setup downloads [MCG-NJU/OneStreamer](https://github.com/MCG-NJU/OneStreamer) at revision `338e5fe77383fc8d691bd6226c0358bcb2c83704`. Upstream code and model weights retain their respective licenses.
 
@@ -124,3 +127,63 @@ the [GPU setup and behavior guide](live-camera/README.md#event-triggered-localiz
 OneStreamer remains the observer; localization runs in a separate persistent process,
 and tracking runs on the CPU. L40S latency and combined GPU memory usage still require
 hardware validation.
+
+## Continuous vision memory and GPT-Live
+
+Continuous vision memory is enabled by default. OneStreamer receives a broad scene-observation
+instruction instead of watching exclusively for the typed question. The question supplies additional
+interests. Each inference batch records its interval, sampled frame times, descriptions, optional
+completed-event summaries and responses. Silence is stored as an undescribed interval, never as
+proof that nothing happened. Sampling gaps are computed from the actual frame timestamps.
+
+The pinned OneStreamer runtime supports prompted generation; the new broad `</Observe>` /
+`</Summary>` prompt still needs validation on the real GPU/model. It does not expose an existing
+hidden perception stream or guarantee a description every round. The adapter preserves those
+sections when generated, including observation-only output. Disable memory to restore the
+previous question-driven prompt.
+
+The backend stores session-scoped memory in `.runtime/vision-memory.sqlite3` (or under
+`LOCAL_WORKSPACE`). Text persists across backend restarts. The newest **256 evidence batches**
+are retained across all sessions, additionally bounded by **128 MB** of JPEG data. Older text
+remains searchable with evidence marked unavailable. Each retained batch contains two exact
+cropped inference snapshots, not a continuous recording. Frame limits, missed samples and
+cropping still limit what can be recovered. The **Vision memory** panel supports keyword and
+time-range lookup, including an earlier session ID. `/api/memory` requires the local access key.
+
+For voice, configure the existing `OPENAI_API_KEY` locally and optionally:
+
+```dotenv
+OPENAI_LIVE_MODEL=gpt-live-1
+OPENAI_LIVE_BACKEND_MODEL=gpt-6-luna
+OPENAI_LIVE_VOICE=marin
+```
+
+Restart the backend, enable **Talk with GPT-Live**, then start the camera and allow microphone
+access. The browser publishes audio to LiveKit with echo cancellation and subscribes only to
+the voice participant's audio in the application. The backend bridges mono PCM16 audio at
+24 kHz to the official GPT-Live primary WebSocket. Native GPT-Live listening and speech run
+concurrently; the application does not add end-of-turn VAD gating. Use **Mute microphone**
+without stopping vision, and **Enable speaker audio** if browser autoplay blocks playback.
+
+Changed descriptions use `session.thinking.append` as quiet context. Model-emitted responses
+or summaries can use `session.commentary.append`, at most once every eight seconds; the
+voice prompt asks it to speak selectively. These events provide context, not guaranteed speech.
+Updates have a bounded queue, exact-repeat suppression and conservative text size limits.
+Queued older updates remain background context. Vision continues if the voice connection fails;
+the UI exposes the failure and requires a session restart to reconnect voice.
+
+GPT-Live delegates detailed visual questions to a Responses backend, which can call
+`search_vision_memory`, `inspect_interval`, and `get_current_scene`. Tools are restricted to
+the active camera session. Inspection sends up to six retained snapshots to the vision-capable
+backend. The current-scene tool returns the latest inference evidence and delivery age; it
+cannot guarantee an instantaneous fresh view. Memory timestamps use the GPU reception clock;
+Live audio timestamps use a separate session clock, so precise speech/video temporal joins
+are not implemented. The application never treats those clocks as identical.
+
+The OpenAI key stays on the backend. Voice sends microphone audio and compact visual text to
+OpenAI; requested inspection also sends selected snapshots. API charges apply. Voice stays off
+unless explicitly enabled in the UI. Update the local backend and GPU worker together because
+the session/event protocol now includes memory and voice options.
+
+References: [GPT-Live events](https://developers.openai.com/api/reference/resources/live/primary-websocket)
+and [delegation/tools](https://developers.openai.com/api/docs/guides/live-delegation).

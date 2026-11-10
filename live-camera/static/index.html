@@ -36,15 +36,27 @@
     <section class="output-panel" aria-labelledby="outputHeading">
       <div class="panel-head"><h2 id="outputHeading">Model output</h2><span class="panel-note">LATEST FIRST</span></div>
       <div id="feed" role="log" aria-live="polite" aria-label="Model observations"><div class="empty"><strong>Ready to watch.</strong>Start your camera to see model observations here.</div></div>
+      <div id="voiceStatus" class="hint" role="status">Voice off</div>
+      <div id="voiceTranscript" class="hint" style="max-height:100px;overflow:auto;white-space:pre-wrap"></div>
+      <button id="resumeAudio" class="secondary" hidden>Enable speaker audio</button>
+      <button id="muteMic" class="secondary" hidden>Mute microphone</button>
       <div id="reviewStatus" role="status" aria-live="polite"></div>
     </section>
   </div>
+  <details class="settings" id="memoryPanel">
+    <summary>Vision memory</summary>
+    <p class="hint">Search the current session or paste an earlier session ID. Times are GPU frame-reception seconds. Coverage describes processed batches, not every instant of video.</p>
+    <div class="options control"><div><label for="memorySession">Session ID</label><input id="memorySession" maxlength="32"></div><div><label for="memoryQuery">Keywords</label><input id="memoryQuery" maxlength="500" placeholder="cup laptop"></div></div>
+    <div class="options control"><div><label for="memoryStart">From (seconds)</label><input id="memoryStart" type="number" min="0" step="0.1"></div><div><label for="memoryEnd">To (seconds)</label><input id="memoryEnd" type="number" min="0" step="0.1"></div></div>
+    <button id="searchMemory" class="secondary">Search memory</button>
+    <div id="memoryResults" class="hint" style="white-space:pre-wrap" role="status"></div>
+  </details>
   <details class="settings" id="settings">
     <summary>Settings &amp; session details</summary>
     <div class="settings-grid">
       <div>
         <div class="control"><label for="key">Local access key</label><input id="key" type="password" autocomplete="off" placeholder="Paste your local backend access key"></div>
-        <div class="control"><label for="prompt">What should the model watch for?</label><textarea id="prompt" maxlength="2000">Tell me whenever I hold an object up to the camera. Describe the object.</textarea></div>
+        <div class="control"><label for="prompt">Visual interests (optional focus)</label><textarea id="prompt" maxlength="2000">Observe the scene continuously. Describe people, objects, positions, actions and meaningful changes.</textarea></div>
         <div class="control"><label for="camera">Camera</label><select id="camera"><option value="">Default camera</option></select></div>
       </div>
       <div>
@@ -54,13 +66,15 @@
         </div>
         <p class="hint">For small objects, choose a crop and hold the object inside the guide. Cropping excludes surrounding context.</p>
         <div class="control"><label class="toggle"><input type="checkbox" id="tracking">Enable tracking</label><p class="hint" id="trackingStatus">Turn detection and tracking on or off, including during a live session.</p><label for="trackingTarget">Target description (optional)</label><input id="trackingTarget" maxlength="500" placeholder="e.g. the bottle held up to the camera"><p class="hint">Leave blank to use OneStreamer's observation. Hold the target still while LocateAnything maps it. CSRT then follows it through the video.</p></div>
+        <div class="control"><label class="toggle"><input type="checkbox" id="visionMemory" checked>Continuous vision memory</label><p class="hint">Store timestamped descriptions, coverage gaps and a bounded set of cropped snapshots locally.</p></div>
+        <div class="control"><label class="toggle"><input type="checkbox" id="voice" disabled>Talk with GPT-Live</label><p class="hint" id="voiceConfig">Checking voice configuration…</p><p class="hint">Sends microphone audio and visual context to OpenAI. Memory tools can send retained snapshots for closer inspection. API charges apply.</p></div>
         <div class="control"><label class="toggle"><input type="checkbox" id="showAll">Show observation states</label></div>
         <div class="control"><label class="toggle"><input type="checkbox" id="verify" disabled>OpenAI second opinion</label><p class="hint" id="verifyConfig">Checking verifier configuration…</p><p class="hint">When enabled, selected snapshots and your prompt/claim are sent to OpenAI. API charges apply. Probabilities and confidence are model estimates.</p></div>
         <button id="verifyNow" class="secondary" disabled>Check task against current view</button>
       </div>
     </div>
     <div class="session-details"><p id="sessionInfo">No session started.</p><p>The GPU samples four frames per second and processes the latest four fresh samples when available. Older samples are dropped to bound delay. Brief events can be missed.</p></div>
-    <p class="privacy">Video travels through LiveKit to your GPU worker. When enabled, cropped evidence snapshots travel to your local backend and OpenAI. This app does not record video or request microphone access. Preview is mirrored; model input is not.</p>
+    <p class="privacy">Video travels through LiveKit to your GPU worker. Vision memory stores descriptions and sampled cropped snapshots locally; it does not record continuous video. GPT-Live sends microphone audio and visual context to OpenAI when enabled; visual inspection and second opinions can also send snapshots. Preview is mirrored; model input is not.</p>
   </details>
 </main>
 <script src="/vendor/livekit-client.umd.js"></script>

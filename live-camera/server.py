@@ -17,14 +17,17 @@ from livekit import api, rtc
 
 from protocol import (EVENT_TOPIC, EVIDENCE_TOPIC, MAX_EVIDENCE_BYTES,
                       Observation, SessionID, Start, WorkerStart, decode_evidence, TRACK_TOPIC, TrackingUpdate, TrackingControl)
+from protocol import MemoryQuery
 from settings import ROOT, Settings
 from verification import Reviewer
+from vision_memory import VisionMemory
+from voice import VoiceAgent
 
 log = logging.getLogger('camera-backend')
 
 
 class CameraSession:
-    def __init__(self, options, output=None):
+    def __init__(self, options, output=None, memory=None):
         self.options = options
         self.output = output
         self.room = rtc.Room()
@@ -37,12 +40,23 @@ class CameraSession:
         self.evidence_task = None
         self.touched = time.monotonic()
         self.active = True
+        self.memory = memory
+        self.voice = None
+        self.last_visual_received = 0
 
     def record(self, observation):
+        if self.memory and self.options.vision_memory:
+            fresh = self.memory.record(observation)
+            if fresh and observation.state not in ('error', 'snapshot'):
+                self.last_visual_received = time.monotonic()
+                if self.voice:
+                    self.voice.observe(observation)
         row = observation.model_dump()
         if observation.event_id in self.evidence_failures:
             row['evidence_status'] = 'transfer_failed'
         old = self.events.get(observation.event_id, {})
+        if old.get('evidence_status') == 'received':
+            row['evidence_status'] = 'received'
         if 'review' in old:
             row['review'] = old['review']
             row['evidence_status'] = old['evidence_status']
@@ -84,6 +98,7 @@ class Coordinator:
         if len(self.access_key) < 24:
             raise ValueError('LOCAL_ACCESS_KEY must be at least 24 characters')
         self.reviewer = reviewer if reviewer is not None else Reviewer(self.workspace)
+        self.memory = VisionMemory(self.workspace / 'vision-memory.sqlite3')
         self.control = rtc.Room()
         self.session = None
         self.guard = asyncio.Lock()
@@ -139,10 +154,12 @@ class Coordinator:
                 raise HTTPException(503, 'GPU worker is not connected to LiveKit')
             if options.verify and not self.reviewer.configured:
                 raise HTTPException(422, 'Configure OPENAI_API_KEY in the local backend')
+            if options.voice and not os.environ.get('OPENAI_API_KEY', ''):
+                raise HTTPException(422, 'Configure OPENAI_API_KEY in the local backend for GPT-Live')
             sid = uuid.uuid4().hex
             worker_options = WorkerStart(**options.model_dump(), session_id=sid,
                 room='camera-'+sid, publisher='camera-'+sid)
-            session = CameraSession(worker_options, self.workspace / 'outputs' / f'camera-{sid}.jsonl')
+            session = CameraSession(worker_options, self.workspace / 'outputs' / f'camera-{sid}.jsonl', self.memory)
             self.session = session
             self.attach_handlers(session)
             try:
@@ -150,16 +167,28 @@ class Coordinator:
                     self.settings.token(self.settings.backend_identity, worker_options.room),
                     rtc.RoomOptions(auto_subscribe=False))
                 await self.command('start', worker_options)
+                if options.voice:
+                    session.voice = VoiceAgent(self.settings, session, self.memory)
+                    try:
+                        await session.voice.open()
+                    except Exception as exc:
+                        raise HTTPException(503, 'GPT-Live could not start. Check OPENAI_API_KEY, model access and backend logs.') from exc
             except BaseException:
                 # On an RPC timeout the worker may already have started. Disconnecting
                 # this room also tells that worker to finish, with its lease as fallback.
                 session.active = False
+                if session.voice:
+                    await session.voice.close()
+                with suppress(HTTPException):
+                    await self.command('stop', {'session_id': sid})
                 await session.room.disconnect()
                 raise
             return dict(session_id=sid, url=self.settings.url,
-                token=self.settings.token(worker_options.publisher, worker_options.room, camera=True),
+                token=self.settings.token(worker_options.publisher, worker_options.room, camera=True, voice=options.voice),
                 fps=4, window_frames=32, image_budget=options.image_budget,
-                verification_enabled=options.verify)
+                verification_enabled=options.verify, voice_enabled=options.voice,
+                voice_identity=session.voice.identity if session.voice else None,
+                vision_memory_enabled=options.vision_memory)
 
     def attach_handlers(self, session):
         @session.room.on('data_received')
@@ -210,15 +239,18 @@ class Coordinator:
             event_id = observation.event_id
             if (not session.active or self.session is not session
                     or observation.session_id != session.options.session_id
-                    or not session.options.verify or event_id in session.evidence_seen
-                    or observation.state not in ('response', 'snapshot')):
+                    or not (session.options.verify or session.options.vision_memory)
+                    or event_id in session.evidence_seen):
                 return
             session.evidence_seen.add(event_id)
             row = session.record(observation)
             row['evidence_status'] = 'received'
-            row['review'] = self.reviewer.enqueue(session.options.session_id,
-                session.options.question, observation.response or '', images, timestamps,
-                event_id=event_id)
+            if session.options.vision_memory:
+                await asyncio.to_thread(self.memory.save_evidence, observation, images, timestamps)
+            if session.options.verify and observation.state in ('response', 'snapshot'):
+                row['review'] = self.reviewer.enqueue(session.options.session_id,
+                    session.options.question, observation.response or '', images, timestamps,
+                    event_id=event_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -250,6 +282,8 @@ class Coordinator:
             if not session.active and not session.room.isconnected():
                 return {'stopped': True}
             session.active = False
+            if session.voice:
+                await session.voice.close()
             if session.evidence_task:
                 session.evidence_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -297,6 +331,7 @@ class Coordinator:
             await self.stop(self.session.options.session_id)
         await self.control.disconnect()
         await asyncio.to_thread(self.reviewer.close)
+        await asyncio.to_thread(self.memory.close)
 
 
 def create_app(coordinator=None):
@@ -338,7 +373,9 @@ def create_app(coordinator=None):
         c = service()
         return dict(ready=c.worker_ready, livekit_configured=c.settings.configured,
                     configuration_error=c.settings.configuration_error,
-                    verification_configured=c.reviewer.configured, verification_model=c.reviewer.model)
+                    verification_configured=c.reviewer.configured, verification_model=c.reviewer.model,
+                    voice_configured=bool(os.environ.get('OPENAI_API_KEY', '')),
+                    voice_model=os.environ.get('OPENAI_LIVE_MODEL', 'gpt-live-1'))
 
     @app.post('/api/start', dependencies=[Depends(authorize)])
     async def start(body: Start):
@@ -350,7 +387,14 @@ def create_app(coordinator=None):
         session = c.current(body.session_id)
         session.touched = time.monotonic()
         return {'active': session.active, 'events': list(session.events.values()),
+                'voice': session.voice.status() if session.voice else {'state': 'off'},
                 'reviews': c.reviewer.get_results(body.session_id)}
+
+    @app.post('/api/memory', dependencies=[Depends(authorize)])
+    async def memory(body: MemoryQuery):
+        c = service()
+        # Explicit session IDs allow local lookup after restart; never cross-session search.
+        return await asyncio.to_thread(c.memory.search, body)
 
     @app.post('/api/tracking', dependencies=[Depends(authorize)])
     async def tracking(body: TrackingControl):

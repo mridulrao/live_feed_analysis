@@ -6,6 +6,8 @@ guide.innerHTML = '<span>OBJECT CROP</span>';
 $('video').parentElement.append(guide);
 const reviewButton = $('verifyNow');
 const reviewStatus = $('reviewStatus');
+let microphoneTrack = null, voiceIdentity = null, voiceReady = false;
+const remoteAudio = new Set();
 let room = null, cameraTrack = null, session = null, opening = false, stopping = false;
 let polling = null, pollBusy = false, verifierReady = false, epoch = 0;
 let history = [], reviewResults = new Map();
@@ -103,9 +105,10 @@ async function api(path, body) {
 function controls(active) {
   $('start').disabled = active;
   $('stop').disabled = !active;
-  for (const id of ['prompt', 'key', 'camera', 'budget', 'crop', 'trackingTarget']) $(id).disabled = active;
+  for (const id of ['prompt', 'key', 'camera', 'budget', 'crop', 'trackingTarget', 'visionMemory']) $(id).disabled = active;
   $('tracking').disabled = opening || stopping || trackingToggleBusy;
   $('verify').disabled = active || !verifierReady;
+  $('voice').disabled = active || !voiceReady;
   reviewButton.disabled = !active || !$('verify').checked;
 }
 function cropSettings() {
@@ -147,18 +150,18 @@ function appendReview(row, result) {
   }
 }
 function render() {
-  const shown = history.filter(r => r.state === 'response' || r.state === 'error' ||
+  const shown = history.filter(r => r.description || r.summary || r.state === 'response' || r.state === 'error' ||
     ($('showAll').checked && r.state !== 'snapshot'));
   $('feed').replaceChildren();
   if (!shown.length) {
     const empty = document.createElement('div'); empty.className = 'empty';
-    empty.textContent = 'Watching for an event that matches your prompt…'; $('feed').append(empty);
+    empty.textContent = $('visionMemory').checked ? 'Building continuous visual context…' : 'Watching for an event that matches your prompt…'; $('feed').append(empty);
   }
   for (const r of shown.slice(-100).reverse()) {
     const row = document.createElement('div'); row.className = 'entry';
-    const at = document.createElement('time'); at.textContent = r.end.toFixed(1)+'s · '+r.state.toUpperCase();
+    const at = document.createElement('time'); at.textContent = r.start.toFixed(1)+'–'+r.end.toFixed(1)+'s · '+(r.description && r.state === 'silence' ? 'OBSERVATION' : r.state.toUpperCase());
     const text = document.createElement('p');
-    text.textContent = r.response || (r.state === 'standby' ? 'Relevant activity in progress.' : 'Observing.');
+    text.textContent = r.description || r.response || r.summary || (r.state === 'standby' ? 'Relevant activity in progress.' : 'Observing.');
     row.append(at, text);
     if (r.review) appendReview(row, reviewResults.get(r.review.id) || r.review);
     else if ($('verify').checked && r.state === 'response') {
@@ -186,6 +189,8 @@ async function poll() {
     history = data.events;
     reviewResults = new Map(data.reviews.map(r => [r.id, r]));
     render();
+    $('voiceStatus').textContent = data.voice?.error || ('Voice '+(data.voice?.state || 'off'));
+    $('voiceTranscript').textContent = (data.voice?.transcripts || []).slice(-4).map(t => (t.role === 'user' ? 'You: ' : 'Assistant: ')+t.text).join('\n');
     const last = history.at(-1);
     if (last) {
       $('gpuTime').textContent = last.inference_seconds.toFixed(2)+'s';
@@ -196,7 +201,7 @@ async function poll() {
     if (failure || !data.active) {
       status(failure?.response || 'Session ended. Start a new session.', true);
       await stop(true);
-    } else status(history.length ? 'Watching for your requested event…' : 'Camera published. Waiting for GPU observations…');
+    } else status(history.length ? ($('visionMemory').checked ? 'Observing continuously · vision memory active' : 'Watching for your requested event…') : 'Camera published. Waiting for GPU observations…');
   } catch (error) {
     status(error.message, true);
     // Keep polling after transient local API failures; the lease handles a closed tab.
@@ -205,6 +210,11 @@ async function poll() {
 async function closeMedia() {
   clearInterval(polling); polling = null;
   clearInterval(trackPolling); trackPolling = null; latestTracks = null; showTrackingStatus('Tracking off');
+  if (microphoneTrack) { microphoneTrack.stop(); microphoneTrack = null; }
+  for (const audio of remoteAudio) { audio.pause(); audio.srcObject = null; audio.remove(); }
+  remoteAudio.clear(); voiceIdentity = null;
+  $('muteMic').hidden = true; $('resumeAudio').hidden = true;
+  $('voiceStatus').textContent = 'Voice off';
   if (cameraTrack) { cameraTrack.stop(); cameraTrack.detach(); cameraTrack = null; }
   const oldRoom = room; room = null;
   if (oldRoom) await oldRoom.disconnect();
@@ -256,18 +266,45 @@ $('start').onclick = async () => {
     $('camera').replaceChildren(...devices.filter(d => d.kind === 'videoinput')
       .map((d, i) => new Option(d.label || 'Camera '+(i+1), d.deviceId)));
     if (selected) $('camera').value = selected;
+    if ($('voice').checked) {
+      $('visionMemory').checked = true;
+      status('Requesting microphone access…');
+      microphoneTrack = await LivekitClient.createLocalAudioTrack({echoCancellation: true, noiseSuppression: true, autoGainControl: true});
+    }
     status('Starting GPU session…');
     const result = await api('start', {question: $('prompt').value.trim(),
       image_budget: Number($('budget').value), crop: cropSettings(), verify: $('verify').checked,
+      vision_memory: $('visionMemory').checked, voice: $('voice').checked,
       tracking: $('tracking').checked, tracking_target: $('trackingTarget').value.trim()});
     session = result.session_id; trackingGeneration = 0;
+    $('memorySession').value = session;
+    voiceIdentity = result.voice_identity;
     showTrackingStatus($('tracking').checked ? 'Watching for your target…' : 'Tracking off');
     const nextRoom = new LivekitClient.Room({adaptiveStream: false, dynacast: false});
     room = nextRoom;
     nextRoom.on(LivekitClient.RoomEvent.Disconnected, () => {
       if (session && !stopping && room === nextRoom) { status('LiveKit disconnected. Restart the session.', true); void stop(true); }
     });
+    nextRoom.on(LivekitClient.RoomEvent.TrackPublished, (publication, participant) => {
+      if (participant.identity === voiceIdentity && publication.kind === LivekitClient.Track.Kind.Audio) publication.setSubscribed(true);
+    });
+    nextRoom.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+      if (participant.identity !== voiceIdentity || track.kind !== LivekitClient.Track.Kind.Audio) return;
+      const audio = track.attach(); audio.autoplay = true; document.body.append(audio); remoteAudio.add(audio);
+      audio.play().catch(() => { $('resumeAudio').hidden = false; });
+    });
+    nextRoom.on(LivekitClient.RoomEvent.TrackUnsubscribed, track => {
+      for (const audio of track.detach()) { remoteAudio.delete(audio); audio.remove(); }
+    });
     await nextRoom.connect(result.url, result.token, {autoSubscribe: false});
+    for (const participant of nextRoom.remoteParticipants.values()) {
+      if (participant.identity === voiceIdentity) for (const publication of participant.audioTrackPublications.values()) publication.setSubscribed(true);
+    }
+    if (microphoneTrack) {
+      await nextRoom.localParticipant.publishTrack(microphoneTrack, {source: LivekitClient.Track.Source.Microphone});
+      $('muteMic').hidden = false; $('muteMic').textContent = 'Mute microphone';
+      await nextRoom.startAudio().catch(() => { $('resumeAudio').hidden = false; });
+    }
     await nextRoom.localParticipant.publishTrack(cameraTrack, {
       source: LivekitClient.Track.Source.Camera, simulcast: false,
       videoEncoding: {maxBitrate: 1800000, maxFramerate: 15}
@@ -284,7 +321,7 @@ $('start').onclick = async () => {
   } finally { opening = false; controls(!!session); }
 };
 window.addEventListener('pagehide', () => {
-  cameraTrack?.stop();
+  cameraTrack?.stop(); microphoneTrack?.stop();
   if (session) fetch('/api/stop', {method: 'POST',
     headers: {'Content-Type': 'application/json', 'X-Access-Key': $('key').value.trim()},
     body: JSON.stringify({session_id: session}), keepalive: true}).catch(() => {});
@@ -293,6 +330,8 @@ async function health() {
   try {
     const data = await fetch('/health').then(r => r.json());
     verifierReady = !!data.verification_configured;
+    voiceReady = !!data.voice_configured;
+    $('voiceConfig').textContent = voiceReady ? 'Available · '+data.voice_model : 'Set OPENAI_API_KEY in the backend environment and restart.';
     if (!session && !opening) {
       controls(false);
       status(!data.livekit_configured ? (data.configuration_error || 'Configure LiveKit in your local .env and restart the backend.')
@@ -303,3 +342,29 @@ async function health() {
   } catch { if (!session) status('Cannot reach the local backend.', true); }
 }
 void health(); setInterval(health, 5000);
+
+$('voice').onchange = () => { if ($('voice').checked) $('visionMemory').checked = true; };
+$('visionMemory').onchange = () => { if (!$('visionMemory').checked) $('voice').checked = false; };
+$('muteMic').onclick = async () => {
+  if (!microphoneTrack) return;
+  try {
+    if (microphoneTrack.isMuted) await microphoneTrack.unmute(); else await microphoneTrack.mute();
+    $('muteMic').textContent = microphoneTrack.isMuted ? 'Unmute microphone' : 'Mute microphone';
+  } catch (error) { $('voiceStatus').textContent = error.message; }
+};
+$('resumeAudio').onclick = async () => {
+  try { await room?.startAudio(); for (const audio of remoteAudio) await audio.play(); $('resumeAudio').hidden = true; }
+  catch { $('voiceStatus').textContent = 'Speaker playback blocked. Try enabling audio again.'; }
+};
+$('searchMemory').onclick = async () => {
+  $('searchMemory').disabled = true;
+  try {
+    const result = await api('memory', {session_id: $('memorySession').value.trim(), query: $('memoryQuery').value.trim(),
+      start: $('memoryStart').value === '' ? null : Number($('memoryStart').value),
+      end: $('memoryEnd').value === '' ? null : Number($('memoryEnd').value)});
+    $('memoryResults').textContent = result.entries.map(e => `${e.start.toFixed(2)}–${e.end.toFixed(2)}s · ${e.state} · ${e.evidence_available ? 'snapshots retained' : 'no retained snapshots'}\n${e.description || e.response || e.summary || 'Processed without a description; activity unknown.'}`).join('\n\n')
+      + '\n\nCoverage gaps: '+(result.gaps.map(g => g.map(t => t.toFixed(2)).join('–')+'s').join(', ') || 'None within the recorded range.')
+      + '\n'+result.limitations;
+  } catch (error) { $('memoryResults').textContent = error.message; }
+  finally { $('searchMemory').disabled = false; }
+};

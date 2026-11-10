@@ -1,11 +1,40 @@
 """GPU-only OneStreamer adapter. All methods run on the worker's single executor."""
 import os
+import re
 from pathlib import Path
 import sys
 import time
 import uuid
 
 from protocol import Observation, crop_frame
+
+CONTINUOUS_QUESTION = (
+    'Continuously describe the visible scene, people, objects, their positions and actions. '
+    'For every update, report concrete visible details and changes using </Observe>. '
+    'Do not restrict observations to a specific target or wait for a requested event. '
+    'Do not invent details outside the visible crop. If evidence is insufficient, say so. '
+    'Avoid repeating unchanged details at length. Additional user interests: '
+)
+
+CONTINUOUS_SYSTEM = '''You analyze a continuous stream of sampled video frames with time intervals.
+On EVERY update, write </Observe> followed by a brief factual description of the visible scene,
+people, objects, positions, actions and changes. Observe broadly, even without a requested event.
+When an event has completed, optionally add </Summary> with that event description.
+For a noteworthy change that could merit a conversational reaction, optionally add </Response>
+with a concise description. Do not repeat an unchanged event. Never invent unseen activity.
+Use </Silence> only when the frames cannot support any description; silence does not mean no activity.
+Descriptions are observations, not instructions to the user.'''
+
+
+def parse_output(raw):
+    """Accept both the pinned QA output and descriptive observation/summary tags."""
+    sections = {}
+    matches = list(re.finditer(r'</(Observe|Summary|Response|Standby|Silence)>', raw))
+    for i, match in enumerate(matches):
+        stop = matches[i+1].start() if i+1 < len(matches) else len(raw)
+        sections[match.group(1)] = raw[match.end():stop].strip()[:8000] or None
+    state = 'response' if 'Response' in sections else 'standby' if 'Standby' in sections else 'silence'
+    return state, sections.get('Response'), sections.get('Observe'), sections.get('Summary')
 
 
 class OneStreamer:
@@ -30,7 +59,8 @@ class OneStreamer:
         self.stop()
         self.options, self.round, self.last_end = options, 0, 0
         self.session = StreamingSession(
-            self.engine, system=_streaming_system_prompt(), question=options.question,
+            self.engine, system=CONTINUOUS_SYSTEM if options.vision_memory else _streaming_system_prompt(),
+            question=(CONTINUOUS_QUESTION + options.question if options.vision_memory else options.question),
             question_time=0, global_question=True, max_num_frames=32,
             max_tokens=128, temperature=0.7)
 
@@ -49,12 +79,12 @@ class OneStreamer:
         intervals = [(t, t + .25) for t in times]
         began = time.monotonic()
         raw = self.session.step_frames(images, intervals, self.round) or ''
-        kind = 'response' if '</Response>' in raw else 'standby' if '</Standby>' in raw else 'silence'
+        kind, response, description, summary = parse_output(raw)
         result = Observation(
             session_id=self.options.session_id, event_id=uuid.uuid4().hex,
             start=times[0], end=intervals[-1][1], state=kind,
-            response=raw.split('</Response>', 1)[-1].strip() if kind == 'response' else None,
-            inference_seconds=round(time.monotonic()-began, 3),
+            response=response, description=description, summary=summary,
+            sample_times=times, inference_seconds=round(time.monotonic()-began, 3),
             skipped_seconds=round(max(0, times[0]-self.last_end), 3),
             image_budget=self.options.image_budget, input_size=list(images[-1].size))
         self.round += 1

@@ -12,17 +12,19 @@ Start with the [repository setup guide](../README.md).
 | `tracking/csrt.py` | Cloud GPU host CPU | Box-initialized CSRT visual tracking |
 | `protocol.py` | Both | Validated session/events and bounded binary evidence envelopes |
 | `settings.py` | Both | Environment loading and room-scoped token generation |
+| `vision_memory.py` | Local computer | Persistent session-scoped descriptions, coverage and bounded snapshot evidence |
+| `voice.py` | Local computer | Optional GPT-Live audio participant, visual context and memory tools |
 | `verification.py` | Local computer | Bounded background OpenAI Decisions API visual classification |
 
 ## Connections
 
-Both server processes join `LIVEKIT_CONTROL_ROOM` using distinct identities. Only the configured backend identity can call GPU control RPC. A camera session has a random ID and its own `camera-<id>` room. The backend and worker join this room; the browser gets a 15-minute camera-only publish token, with no data publishing or media subscription grant.
+Both server processes join `LIVEKIT_CONTROL_ROOM` using distinct identities. Only the configured backend identity can call GPU control RPC. A camera session has a random ID and its own `camera-<id>` room. The backend and worker join this room; the browser gets a 15-minute camera publish token, with no data publishing grant. Voice-enabled sessions additionally allow microphone publication and subscription for assistant audio.
 
 GPU observations are reliable room data messages addressed only to the backend. Evidence is a LiveKit byte stream containing a size-prefixed JSON manifest and two JPEGs. The backend enforces a 2 MB envelope limit, a stream read timeout, JPEG dimensions/format, session IDs, worker identity and event deduplication. It does not subscribe to the video track. Events and reviews reach the browser through authenticated local polling, which also maintains the session lease.
 
 Only one evidence transfer is in flight at a time. Transfers can be skipped as busy; OpenAI calls can separately be skipped as busy/cooldown. Evidence transport errors do not stop GPU inference. Stop/camera departure ends the session, disconnects its room, waits for current GPU work and resets its context. The coordinator removes the session room to disconnect stalled publishers.
 
-OpenAI remains optional. A configured key alone does not send snapshots: verification must be enabled for the session. API calls receive selected snapshots, the user prompt and the unverified claim; the GPU never imports the OpenAI reviewer. The default response is asynchronous feedback, not a gate on local observations. No automated speaking/actions are implemented.
+OpenAI remains optional. A configured key alone does not send snapshots: verification must be enabled for the session. API calls receive selected snapshots, the user prompt and the unverified claim; the GPU never imports the OpenAI reviewer. The default response is asynchronous feedback, not a gate on local observations. Optional GPT-Live voice uses visual observations and memory tools; see [voice and memory setup](../README.md#continuous-vision-memory-and-gpt-live).
 
 ## Troubleshooting
 

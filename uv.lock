@@ -428,6 +428,7 @@ name = "live-feed-analysis"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "livekit" },
@@ -439,6 +440,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.12,<4" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "livekit", specifier = ">=1,<2" },

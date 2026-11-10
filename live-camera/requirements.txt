@@ -6,3 +6,4 @@ livekit-api==1.2.2
 python-dotenv==1.2.4
 Pillow>=11,<13
 httpx>=0.28,<1
+aiohttp>=3.12,<4

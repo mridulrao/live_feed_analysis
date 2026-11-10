@@ -54,11 +54,12 @@ class Settings:
     def configured(self):
         return self.configuration_error is None
 
-    def token(self, identity, room, *, camera=False):
+    def token(self, identity, room, *, camera=False, voice=False, agent=False):
         return (api.AccessToken(self.api_key, self.api_secret)
                 .with_identity(identity).with_ttl(timedelta(minutes=15 if camera else 360))
                 .with_grants(api.VideoGrants(
-                    room_join=True, room=room, can_publish=camera,
-                    can_subscribe=not camera, can_publish_data=not camera,
-                    can_publish_sources=['camera'] if camera else [],
+                    room_join=True, room=room, can_publish=camera or agent,
+                    can_subscribe=not camera or voice, can_publish_data=not camera and not agent,
+                    can_publish_sources=(['camera', 'microphone'] if voice else ['camera']) if camera
+                        else ['microphone'] if agent else [],
                     can_update_own_metadata=False)).to_jwt())

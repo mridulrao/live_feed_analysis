@@ -34,6 +34,8 @@ class Start(BaseModel):
     image_budget: Literal[224, 336, 448] = 448
     crop: Crop | None = None
     verify: bool = False
+    vision_memory: bool = True
+    voice: bool = False
     tracking: bool = False
     tracking_target: str = Field(default="", max_length=500)
 
@@ -42,6 +44,8 @@ class Start(BaseModel):
         self.question = self.question.strip()
         if not self.question:
             raise ValueError('Enter a question or instruction')
+        if self.voice and not self.vision_memory:
+            raise ValueError('Voice requires vision memory')
         return self
 
 
@@ -72,11 +76,37 @@ class Observation(SessionID):
     start: float = Field(ge=0)
     end: float = Field(ge=0)
     response: str | None = Field(default=None, max_length=8000)
+    description: str | None = Field(default=None, max_length=8000)
+    summary: str | None = Field(default=None, max_length=8000)
+    sample_times: list[float] = Field(default_factory=list, max_length=4)
     inference_seconds: float = Field(default=0, ge=0)
     skipped_seconds: float = Field(default=0, ge=0)
     image_budget: int = 448
     input_size: list[int] = Field(default_factory=list, max_length=2)
     evidence_status: str = Field(default='not_requested', max_length=100)
+
+    @model_validator(mode='after')
+    def ordered_interval(self):
+        if self.end < self.start:
+            raise ValueError('Observation end precedes start')
+        if (any(not math.isfinite(t) or not self.start <= t <= self.end for t in self.sample_times)
+                or self.sample_times != sorted(self.sample_times)):
+            raise ValueError('Invalid sample times')
+        return self
+
+
+class MemoryQuery(SessionID):
+    model_config = ConfigDict(allow_inf_nan=False, extra='forbid')
+    query: str = Field(default='', max_length=500)
+    start: float | None = Field(default=None, ge=0)
+    end: float | None = Field(default=None, ge=0)
+    limit: int = Field(default=12, ge=1, le=30)
+
+    @model_validator(mode='after')
+    def ordered_interval(self):
+        if self.start is not None and self.end is not None and self.end < self.start:
+            raise ValueError('Memory end precedes start')
+        return self
 
 
 def crop_frame(image, crop):

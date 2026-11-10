@@ -304,7 +304,7 @@ class VideoSession:
                     break
                 if self.options.tracking and result.state == 'response':
                     self.trigger_localization(result, images[-1], times[-1])
-                if self.options.verify and result.state == 'response':
+                if self.options.vision_memory or (self.options.verify and result.state == 'response'):
                     self.queue_evidence(result, images, times)
                 await self.publish(result)
             await asyncio.sleep(.05)
